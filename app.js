@@ -2,9 +2,11 @@
   "use strict";
 
   var STORAGE_KEY = "readit-voice-uri";
+  var EL_STORAGE_KEY = "readit-el-voice-id";
   var RATE_KEY = "readit-rate";
   var PREVIEW =
     "Hey Cap. This is how I sound with the voice you picked.";
+  var MAX_TTS_CHARS = 5000;
 
   var textEl = document.getElementById("text");
   var voiceEl = document.getElementById("voice");
@@ -15,13 +17,21 @@
   var pauseBtn = document.getElementById("pause");
   var stopBtn = document.getElementById("stop");
   var unsupportedEl = document.getElementById("unsupported");
+  var hintEl = document.getElementById("voice-hint");
+  var footerEl = document.querySelector(".footer p");
 
+  /** "elevenlabs" | "webspeech" */
+  var mode = "webspeech";
   var voices = [];
   var voicesFingerprint = "";
   var utterance = null;
   var isPaused = false;
   var speaking = false;
   var speakTimer = null;
+  var loadingTts = false;
+  var audioEl = null;
+  var audioUrl = null;
+  var elVoices = [];
 
   function speechAvailable() {
     return (
@@ -53,21 +63,55 @@
 
   function setControls() {
     var hasText = textEl.value.trim().length > 0;
-    var hasVoices = voices.length > 0;
-    playBtn.disabled = !speechAvailable() || !hasText || !hasVoices;
-    pauseBtn.disabled = !speaking;
-    stopBtn.disabled = !speaking && !isPaused;
-    playBtn.textContent = isPaused ? "Resume" : "Play";
+    var hasVoices =
+      mode === "elevenlabs" ? elVoices.length > 0 : voices.length > 0;
+    var canResumeEl = mode === "elevenlabs" && isPaused && audioEl && audioEl.src;
+    var canPlay =
+      !loadingTts &&
+      hasVoices &&
+      (canResumeEl ||
+        (hasText && (mode === "elevenlabs" || speechAvailable())));
+    playBtn.disabled = !canPlay;
+    pauseBtn.disabled = !speaking || loadingTts;
+    stopBtn.disabled = !speaking && !isPaused && !loadingTts;
+    if (loadingTts) {
+      playBtn.textContent = "Loading…";
+      playBtn.disabled = true;
+    } else {
+      playBtn.textContent = isPaused ? "Resume" : "Play";
+    }
   }
 
-  /** Higher = more natural / preferred for Cap */
+  function setModeCopy() {
+    if (mode === "elevenlabs") {
+      if (hintEl) {
+        hintEl.textContent =
+          "Natural ElevenLabs voices. Changing voice plays a short sample. Speed is applied on the next Play.";
+      }
+      if (footerEl) {
+        footerEl.textContent =
+          "Voices via ElevenLabs (server-side). Falls back to device voices if unavailable.";
+      }
+    } else {
+      if (hintEl) {
+        hintEl.textContent =
+          "Tip: pick a voice tagged “clearer” (Google / Neural / Enhanced). Changing voice plays a short sample. Device voices — ElevenLabs unavailable here (missing key or API error).";
+      }
+      if (footerEl) {
+        footerEl.textContent =
+          "Uses your device’s voices (Web Speech API) — no account needed.";
+      }
+    }
+  }
+
+  /* ---------- Web Speech helpers (fallback) ---------- */
+
   function voiceQuality(v) {
     var n = (v.name || "").toLowerCase();
     var lang = (v.lang || "").toLowerCase();
     var score = 0;
     if (/^en/.test(lang)) score += 50;
     if (/en-us|en_us/.test(lang)) score += 10;
-    // Neural / enhanced / premium system voices
     if (/neural|natural|enhanced|premium|wavenet|studio|journey|news|polyglot/i.test(n))
       score += 80;
     if (/google/.test(n)) score += 60;
@@ -75,7 +119,6 @@
     if (/samantha|aaron|nicky|susan|tom|moira|karen|daniel|fiona|tessa|rishi|martha|gordon/i.test(n))
       score += 40;
     if (v.localService) score += 5;
-    // Demote classic robotic compact voices
     if (/microsoft david|microsoft zira|microsoft mark|microsoft hazel/i.test(n) && !/natural|neural/.test(n))
       score -= 40;
     if (/compact|eloquence|espeak|robot|dummy/i.test(n)) score -= 50;
@@ -110,7 +153,7 @@
       .join("\n");
   }
 
-  function populateVoices(force) {
+  function populateWebSpeechVoices(force) {
     if (!speechAvailable()) return;
 
     var list = window.speechSynthesis.getVoices() || [];
@@ -195,7 +238,7 @@
     setControls();
   }
 
-  function selectedVoice() {
+  function selectedWebSpeechVoice() {
     var key = voiceEl.value;
     if (!key) return null;
     for (var i = 0; i < voices.length; i++) {
@@ -204,31 +247,12 @@
     return null;
   }
 
-  function saveVoice() {
-    var v = selectedVoice();
+  function saveWebSpeechVoice() {
+    var v = selectedWebSpeechVoice();
     if (!v) return;
     try {
       localStorage.setItem(STORAGE_KEY, voiceKey(v));
     } catch (e) {}
-  }
-
-  function saveRate() {
-    try {
-      localStorage.setItem(RATE_KEY, rateEl.value);
-    } catch (e) {}
-  }
-
-  function loadRate() {
-    try {
-      var r = localStorage.getItem(RATE_KEY);
-      if (r != null) {
-        var n = parseFloat(r);
-        if (!isNaN(n) && n >= 0.75 && n <= 1.5) {
-          rateEl.value = String(n);
-        }
-      }
-    } catch (e) {}
-    updateRateLabel();
   }
 
   function clearUtterance() {
@@ -238,7 +262,7 @@
     setControls();
   }
 
-  function stopSpeaking() {
+  function stopWebSpeech() {
     if (!speechAvailable()) return;
     if (speakTimer) {
       clearTimeout(speakTimer);
@@ -250,14 +274,13 @@
 
   function applyVoice(utt, v) {
     if (!v) return;
-    // Chrome often ignores .voice unless .lang matches
     try {
       utt.voice = v;
     } catch (e) {}
     if (v.lang) utt.lang = v.lang;
   }
 
-  function speakText(text, fromGesture) {
+  function speakWebSpeech(text, fromGesture) {
     if (!speechAvailable()) return;
     if (!text) return;
 
@@ -266,15 +289,13 @@
       speakTimer = null;
     }
 
-    // Cancel leftover queue (Safari / Chrome quirks)
     window.speechSynthesis.cancel();
 
     function start() {
       utterance = new SpeechSynthesisUtterance(text);
-      var v = selectedVoice();
+      var v = selectedWebSpeechVoice();
       applyVoice(utterance, v);
       utterance.rate = parseFloat(rateEl.value) || 1;
-      // Slight pitch can soften some robotic system voices
       utterance.pitch = 1.02;
       utterance.volume = 1;
 
@@ -295,13 +316,11 @@
       setControls();
       window.speechSynthesis.speak(utterance);
 
-      // Chrome bug: sometimes needs a kick if paused internally
       if (window.speechSynthesis.paused) {
         window.speechSynthesis.resume();
       }
     }
 
-    // After cancel(), Chrome needs a beat before speak() or the voice sticks to default
     if (fromGesture) {
       speakTimer = setTimeout(start, 60);
     } else {
@@ -309,11 +328,244 @@
     }
   }
 
-  function play() {
-    if (!speechAvailable()) return;
-    var text = textEl.value.trim();
-    if (!text) return;
+  /* ---------- ElevenLabs helpers ---------- */
 
+  function elLabel(v) {
+    var parts = [v.name || "Voice"];
+    var labels = v.labels || {};
+    var accent = labels.accent || labels.language || "";
+    var desc = labels.description || labels.descriptive || labels.use_case || "";
+    if (accent) parts.push("(" + accent + ")");
+    if (desc) parts.push("· " + desc);
+    return parts.join(" ");
+  }
+
+  function populateElevenVoices(list) {
+    elVoices = list || [];
+    voiceEl.innerHTML = "";
+
+    if (!elVoices.length) {
+      var empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "No ElevenLabs voices";
+      voiceEl.appendChild(empty);
+      voiceEl.disabled = true;
+      setControls();
+      return;
+    }
+
+    var saved = null;
+    try {
+      saved = localStorage.getItem(EL_STORAGE_KEY);
+    } catch (e) {}
+
+    var pick = null;
+    elVoices.forEach(function (v) {
+      var o = document.createElement("option");
+      o.value = v.id;
+      o.textContent = elLabel(v);
+      voiceEl.appendChild(o);
+      if (saved && v.id === saved) pick = v.id;
+    });
+
+    if (!pick) pick = elVoices[0].id;
+    voiceEl.value = pick;
+    voiceEl.disabled = false;
+    setControls();
+  }
+
+  function saveElVoice() {
+    var id = voiceEl.value;
+    if (!id) return;
+    try {
+      localStorage.setItem(EL_STORAGE_KEY, id);
+    } catch (e) {}
+  }
+
+  function revokeAudio() {
+    if (audioUrl) {
+      try {
+        URL.revokeObjectURL(audioUrl);
+      } catch (e) {}
+      audioUrl = null;
+    }
+  }
+
+  function stopEleven() {
+    if (audioEl) {
+      try {
+        audioEl.pause();
+        audioEl.removeAttribute("src");
+        audioEl.load();
+      } catch (e) {}
+    }
+    revokeAudio();
+    speaking = false;
+    isPaused = false;
+    loadingTts = false;
+    setControls();
+  }
+
+  function ensureAudio() {
+    if (!audioEl) {
+      audioEl = new Audio();
+      audioEl.preload = "auto";
+      audioEl.addEventListener("play", function () {
+        speaking = true;
+        isPaused = false;
+        setControls();
+      });
+      audioEl.addEventListener("pause", function () {
+        if (audioEl && !audioEl.ended && audioEl.currentTime > 0) {
+          isPaused = true;
+          speaking = false;
+          setControls();
+        }
+      });
+      audioEl.addEventListener("ended", function () {
+        speaking = false;
+        isPaused = false;
+        setControls();
+      });
+      audioEl.addEventListener("error", function () {
+        speaking = false;
+        isPaused = false;
+        loadingTts = false;
+        setControls();
+      });
+    }
+    return audioEl;
+  }
+
+  function playBlob(blob) {
+    stopEleven();
+    var audio = ensureAudio();
+    audioUrl = URL.createObjectURL(blob);
+    audio.src = audioUrl;
+    speaking = true;
+    isPaused = false;
+    loadingTts = false;
+    setControls();
+    var p = audio.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(function () {
+        speaking = false;
+        isPaused = false;
+        setControls();
+      });
+    }
+  }
+
+  function fetchTts(text, voiceId) {
+    var rate = parseFloat(rateEl.value) || 1;
+    return fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
+      body: JSON.stringify({ text: text, voiceId: voiceId, rate: rate }),
+    }).then(function (res) {
+      if (!res.ok) {
+        return res
+          .json()
+          .catch(function () {
+            return { error: "TTS failed (" + res.status + ")" };
+          })
+          .then(function (err) {
+            throw new Error(err.error || "TTS failed");
+          });
+      }
+      return res.blob();
+    });
+  }
+
+  function playEleven(text) {
+    var voiceId = voiceEl.value;
+    if (!voiceId || !text) return;
+
+    if (text.length > MAX_TTS_CHARS) {
+      window.alert(
+        "Text is too long for ElevenLabs (max " +
+          MAX_TTS_CHARS +
+          " characters). Shorten it a bit."
+      );
+      return;
+    }
+
+    // Resume paused audio without re-fetch
+    if (isPaused && audioEl && audioEl.src) {
+      var p = audioEl.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(function () {});
+      }
+      speaking = true;
+      isPaused = false;
+      setControls();
+      return;
+    }
+
+    stopEleven();
+    loadingTts = true;
+    setControls();
+
+    fetchTts(text, voiceId)
+      .then(function (blob) {
+        playBlob(blob);
+      })
+      .catch(function () {
+        loadingTts = false;
+        speaking = false;
+        isPaused = false;
+        setControls();
+        window.alert("Couldn’t generate speech. Try again or pick another voice.");
+      });
+  }
+
+  function pauseEleven() {
+    if (!audioEl || !speaking) return;
+    audioEl.pause();
+    isPaused = true;
+    speaking = false;
+    setControls();
+  }
+
+  function previewEleven() {
+    saveElVoice();
+    playEleven(PREVIEW);
+  }
+
+  /* ---------- Shared controls ---------- */
+
+  function saveRate() {
+    try {
+      localStorage.setItem(RATE_KEY, rateEl.value);
+    } catch (e) {}
+  }
+
+  function loadRate() {
+    try {
+      var r = localStorage.getItem(RATE_KEY);
+      if (r != null) {
+        var n = parseFloat(r);
+        if (!isNaN(n) && n >= 0.75 && n <= 1.5) {
+          rateEl.value = String(n);
+        }
+      }
+    } catch (e) {}
+    updateRateLabel();
+  }
+
+  function play() {
+    var text = textEl.value.trim();
+    if (mode === "elevenlabs") {
+      if (isPaused && audioEl && audioEl.src) {
+        playEleven(text);
+        return;
+      }
+      if (!text) return;
+      playEleven(text);
+      return;
+    }
+    if (!speechAvailable()) return;
+    if (!text) return;
     if (isPaused) {
       window.speechSynthesis.resume();
       isPaused = false;
@@ -321,17 +573,14 @@
       setControls();
       return;
     }
-
-    speakText(text, true);
-  }
-
-  function previewVoice() {
-    saveVoice();
-    // Short sample so Cap hears the change immediately
-    speakText(PREVIEW, true);
+    speakWebSpeech(text, true);
   }
 
   function pause() {
+    if (mode === "elevenlabs") {
+      pauseEleven();
+      return;
+    }
     if (!speechAvailable() || !speaking) return;
     window.speechSynthesis.pause();
     isPaused = true;
@@ -339,7 +588,27 @@
     setControls();
   }
 
-  function init() {
+  function stopSpeaking() {
+    if (mode === "elevenlabs") {
+      stopEleven();
+      return;
+    }
+    stopWebSpeech();
+  }
+
+  function previewVoice() {
+    if (mode === "elevenlabs") {
+      previewEleven();
+      return;
+    }
+    saveWebSpeechVoice();
+    speakWebSpeech(PREVIEW, true);
+  }
+
+  function initWebSpeechFallback() {
+    mode = "webspeech";
+    setModeCopy();
+
     if (!speechAvailable()) {
       unsupportedEl.hidden = false;
       playBtn.disabled = true;
@@ -350,26 +619,48 @@
       return;
     }
 
-    loadRate();
-    populateVoices(true);
+    unsupportedEl.hidden = true;
+    populateWebSpeechVoices(true);
 
     if (typeof window.speechSynthesis.addEventListener === "function") {
       window.speechSynthesis.addEventListener("voiceschanged", function () {
-        populateVoices(false);
+        if (mode === "webspeech") populateWebSpeechVoices(false);
       });
     } else {
       window.speechSynthesis.onvoiceschanged = function () {
-        populateVoices(false);
+        if (mode === "webspeech") populateWebSpeechVoices(false);
       };
     }
 
     var tries = 0;
     var poll = setInterval(function () {
+      if (mode !== "webspeech") {
+        clearInterval(poll);
+        return;
+      }
       tries += 1;
-      populateVoices(false);
+      populateWebSpeechVoices(false);
       if (voices.length || tries > 20) clearInterval(poll);
     }, 250);
+  }
 
+  function tryElevenLabs() {
+    return fetch("/api/voices", { headers: { Accept: "application/json" } })
+      .then(function (res) {
+        if (!res.ok) throw new Error("voices " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var list = (data && data.voices) || [];
+        if (!list.length) throw new Error("empty voices");
+        mode = "elevenlabs";
+        setModeCopy();
+        unsupportedEl.hidden = true;
+        populateElevenVoices(list);
+      });
+  }
+
+  function wireUi() {
     textEl.addEventListener("input", function () {
       updateCounts();
       setControls();
@@ -385,13 +676,24 @@
     stopBtn.addEventListener("click", stopSpeaking);
 
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden && (speaking || isPaused)) {
+      if (document.hidden && (speaking || isPaused || loadingTts)) {
         stopSpeaking();
       }
     });
 
     updateCounts();
     setControls();
+  }
+
+  function init() {
+    loadRate();
+    wireUi();
+    voiceEl.innerHTML = '<option value="">Loading voices…</option>';
+    voiceEl.disabled = true;
+
+    tryElevenLabs().catch(function () {
+      initWebSpeechFallback();
+    });
   }
 
   if (document.readyState === "loading") {
