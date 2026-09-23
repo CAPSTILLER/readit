@@ -284,3 +284,14 @@ body {
     font-size: 2rem;
   }
 }
+
+.hint {
+  margin: 1rem 0 0;
+  padding: 0.85rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}

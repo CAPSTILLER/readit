@@ -3,6 +3,8 @@
 
   var STORAGE_KEY = "readit-voice-uri";
   var RATE_KEY = "readit-rate";
+  var PREVIEW =
+    "Hey Cap. This is how I sound with the voice you picked.";
 
   var textEl = document.getElementById("text");
   var voiceEl = document.getElementById("voice");
@@ -15,12 +17,18 @@
   var unsupportedEl = document.getElementById("unsupported");
 
   var voices = [];
+  var voicesFingerprint = "";
   var utterance = null;
   var isPaused = false;
   var speaking = false;
+  var speakTimer = null;
 
   function speechAvailable() {
-    return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
+    return (
+      typeof window !== "undefined" &&
+      "speechSynthesis" in window &&
+      typeof SpeechSynthesisUtterance !== "undefined"
+    );
   }
 
   function updateCounts() {
@@ -28,7 +36,14 @@
     var trimmed = raw.trim();
     var words = trimmed ? trimmed.split(/\s+/).length : 0;
     var chars = raw.length;
-    countsEl.textContent = words + " word" + (words === 1 ? "" : "s") + " · " + chars + " character" + (chars === 1 ? "" : "s");
+    countsEl.textContent =
+      words +
+      " word" +
+      (words === 1 ? "" : "s") +
+      " · " +
+      chars +
+      " character" +
+      (chars === 1 ? "" : "s");
   }
 
   function updateRateLabel() {
@@ -45,11 +60,38 @@
     playBtn.textContent = isPaused ? "Resume" : "Play";
   }
 
+  /** Higher = more natural / preferred for Cap */
+  function voiceQuality(v) {
+    var n = (v.name || "").toLowerCase();
+    var lang = (v.lang || "").toLowerCase();
+    var score = 0;
+    if (/^en/.test(lang)) score += 50;
+    if (/en-us|en_us/.test(lang)) score += 10;
+    // Neural / enhanced / premium system voices
+    if (/neural|natural|enhanced|premium|wavenet|studio|journey|news|polyglot/i.test(n))
+      score += 80;
+    if (/google/.test(n)) score += 60;
+    if (/microsoft/.test(n) && /online|natural|neural/.test(n)) score += 55;
+    if (/samantha|aaron|nicky|susan|tom|moira|karen|daniel|fiona|tessa|rishi|martha|gordon/i.test(n))
+      score += 40;
+    if (v.localService) score += 5;
+    // Demote classic robotic compact voices
+    if (/microsoft david|microsoft zira|microsoft mark|microsoft hazel/i.test(n) && !/natural|neural/.test(n))
+      score -= 40;
+    if (/compact|eloquence|espeak|robot|dummy/i.test(n)) score -= 50;
+    return score;
+  }
+
+  function voiceKey(v) {
+    return v.voiceURI || v.name + "|" + v.lang;
+  }
+
   function voiceLabel(v) {
     var name = v.name || "Voice";
     var lang = v.lang || "";
-    var local = v.localService ? "" : " · online";
-    return name + (lang ? " (" + lang + ")" : "") + local;
+    var q = voiceQuality(v);
+    var tag = q >= 100 ? " · clearer" : !v.localService ? " · online" : "";
+    return name + (lang ? " (" + lang + ")" : "") + tag;
   }
 
   function langGroup(lang) {
@@ -60,15 +102,31 @@
       : parts[0].toUpperCase() + (parts[1] ? "-" + parts[1].toUpperCase() : "");
   }
 
-  function populateVoices() {
+  function fingerprint(list) {
+    return list
+      .map(function (v) {
+        return voiceKey(v);
+      })
+      .join("\n");
+  }
+
+  function populateVoices(force) {
     if (!speechAvailable()) return;
 
-    voices = window.speechSynthesis.getVoices() || [];
+    var list = window.speechSynthesis.getVoices() || [];
+    var fp = fingerprint(list);
+    if (!force && fp && fp === voicesFingerprint && voices.length) {
+      return;
+    }
+    voices = list;
+    voicesFingerprint = fp;
+
     var saved = null;
     try {
       saved = localStorage.getItem(STORAGE_KEY);
     } catch (e) {}
 
+    var prev = voiceEl.value;
     voiceEl.innerHTML = "";
 
     if (!voices.length) {
@@ -81,15 +139,24 @@
       return;
     }
 
+    var ranked = voices
+      .map(function (v, i) {
+        return { voice: v, index: i, q: voiceQuality(v) };
+      })
+      .sort(function (a, b) {
+        if (b.q !== a.q) return b.q - a.q;
+        return (a.voice.name || "").localeCompare(b.voice.name || "");
+      });
+
     var groups = {};
     var order = [];
-    voices.forEach(function (v, i) {
-      var g = langGroup(v.lang);
+    ranked.forEach(function (item) {
+      var g = langGroup(item.voice.lang);
       if (!groups[g]) {
         groups[g] = [];
         order.push(g);
       }
-      groups[g].push({ voice: v, index: i });
+      groups[g].push(item);
     });
 
     order.sort(function (a, b) {
@@ -99,56 +166,49 @@
       return a.localeCompare(b);
     });
 
-    var selectedIndex = -1;
+    var bestKey = ranked[0] ? voiceKey(ranked[0].voice) : "";
+    var pick = null;
+
     order.forEach(function (g) {
       var og = document.createElement("optgroup");
       og.label = g;
-      groups[g]
-        .sort(function (a, b) {
-          return (a.voice.name || "").localeCompare(b.voice.name || "");
-        })
-        .forEach(function (item) {
-          var o = document.createElement("option");
-          o.value = String(item.index);
-          o.textContent = voiceLabel(item.voice);
-          if (saved && (item.voice.voiceURI === saved || item.voice.name === saved)) {
-            selectedIndex = item.index;
-          }
-          og.appendChild(o);
-        });
+      groups[g].forEach(function (item) {
+        var o = document.createElement("option");
+        var key = voiceKey(item.voice);
+        o.value = key;
+        o.textContent = voiceLabel(item.voice);
+        og.appendChild(o);
+        if (saved && (item.voice.voiceURI === saved || item.voice.name === saved || key === saved)) {
+          pick = key;
+        }
+      });
       voiceEl.appendChild(og);
     });
 
-    if (selectedIndex >= 0) {
-      voiceEl.value = String(selectedIndex);
-    } else {
-      var preferred =
-        voices.findIndex(function (v) {
-          return /en-?US/i.test(v.lang) && /google|samantha|aaron|daniel|karen|moira/i.test(v.name);
-        });
-      if (preferred < 0) {
-        preferred = voices.findIndex(function (v) {
-          return /en/i.test(v.lang);
-        });
-      }
-      voiceEl.value = String(preferred >= 0 ? preferred : 0);
+    if (!pick && prev && ranked.some(function (item) { return voiceKey(item.voice) === prev; })) {
+      pick = prev;
     }
+    if (!pick) pick = bestKey;
 
+    voiceEl.value = pick;
     voiceEl.disabled = false;
     setControls();
   }
 
   function selectedVoice() {
-    var idx = parseInt(voiceEl.value, 10);
-    if (isNaN(idx) || idx < 0 || idx >= voices.length) return null;
-    return voices[idx];
+    var key = voiceEl.value;
+    if (!key) return null;
+    for (var i = 0; i < voices.length; i++) {
+      if (voiceKey(voices[i]) === key) return voices[i];
+    }
+    return null;
   }
 
   function saveVoice() {
     var v = selectedVoice();
     if (!v) return;
     try {
-      localStorage.setItem(STORAGE_KEY, v.voiceURI || v.name);
+      localStorage.setItem(STORAGE_KEY, voiceKey(v));
     } catch (e) {}
   }
 
@@ -180,8 +240,73 @@
 
   function stopSpeaking() {
     if (!speechAvailable()) return;
+    if (speakTimer) {
+      clearTimeout(speakTimer);
+      speakTimer = null;
+    }
     window.speechSynthesis.cancel();
     clearUtterance();
+  }
+
+  function applyVoice(utt, v) {
+    if (!v) return;
+    // Chrome often ignores .voice unless .lang matches
+    try {
+      utt.voice = v;
+    } catch (e) {}
+    if (v.lang) utt.lang = v.lang;
+  }
+
+  function speakText(text, fromGesture) {
+    if (!speechAvailable()) return;
+    if (!text) return;
+
+    if (speakTimer) {
+      clearTimeout(speakTimer);
+      speakTimer = null;
+    }
+
+    // Cancel leftover queue (Safari / Chrome quirks)
+    window.speechSynthesis.cancel();
+
+    function start() {
+      utterance = new SpeechSynthesisUtterance(text);
+      var v = selectedVoice();
+      applyVoice(utterance, v);
+      utterance.rate = parseFloat(rateEl.value) || 1;
+      // Slight pitch can soften some robotic system voices
+      utterance.pitch = 1.02;
+      utterance.volume = 1;
+
+      utterance.onstart = function () {
+        speaking = true;
+        isPaused = false;
+        setControls();
+      };
+      utterance.onend = function () {
+        clearUtterance();
+      };
+      utterance.onerror = function () {
+        clearUtterance();
+      };
+
+      speaking = true;
+      isPaused = false;
+      setControls();
+      window.speechSynthesis.speak(utterance);
+
+      // Chrome bug: sometimes needs a kick if paused internally
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+    }
+
+    // After cancel(), Chrome needs a beat before speak() or the voice sticks to default
+    if (fromGesture) {
+      speakTimer = setTimeout(start, 60);
+    } else {
+      start();
+    }
   }
 
   function play() {
@@ -189,7 +314,6 @@
     var text = textEl.value.trim();
     if (!text) return;
 
-    // Safari / Chrome: resume after pause
     if (isPaused) {
       window.speechSynthesis.resume();
       isPaused = false;
@@ -198,32 +322,13 @@
       return;
     }
 
-    // Fresh start — cancel any leftover queue (Safari quirk)
-    window.speechSynthesis.cancel();
+    speakText(text, true);
+  }
 
-    utterance = new SpeechSynthesisUtterance(text);
-    var v = selectedVoice();
-    if (v) utterance.voice = v;
-    utterance.rate = parseFloat(rateEl.value) || 1;
-    utterance.pitch = 1;
-
-    utterance.onstart = function () {
-      speaking = true;
-      isPaused = false;
-      setControls();
-    };
-    utterance.onend = function () {
-      clearUtterance();
-    };
-    utterance.onerror = function () {
-      clearUtterance();
-    };
-
-    speaking = true;
-    isPaused = false;
-    setControls();
-    // Must be called from a user gesture on first speak (Safari / iOS)
-    window.speechSynthesis.speak(utterance);
+  function previewVoice() {
+    saveVoice();
+    // Short sample so Cap hears the change immediately
+    speakText(PREVIEW, true);
   }
 
   function pause() {
@@ -246,19 +351,22 @@
     }
 
     loadRate();
-    populateVoices();
+    populateVoices(true);
 
-    // Voices often load asynchronously (Chrome, Safari)
     if (typeof window.speechSynthesis.addEventListener === "function") {
-      window.speechSynthesis.addEventListener("voiceschanged", populateVoices);
+      window.speechSynthesis.addEventListener("voiceschanged", function () {
+        populateVoices(false);
+      });
     } else {
-      window.speechSynthesis.onvoiceschanged = populateVoices;
+      window.speechSynthesis.onvoiceschanged = function () {
+        populateVoices(false);
+      };
     }
-    // Extra poll for stubborn Safari / older WebKit
+
     var tries = 0;
     var poll = setInterval(function () {
       tries += 1;
-      populateVoices();
+      populateVoices(false);
       if (voices.length || tries > 20) clearInterval(poll);
     }, 250);
 
@@ -266,7 +374,7 @@
       updateCounts();
       setControls();
     });
-    voiceEl.addEventListener("change", saveVoice);
+    voiceEl.addEventListener("change", previewVoice);
     rateEl.addEventListener("input", function () {
       updateRateLabel();
       saveRate();
@@ -276,7 +384,6 @@
     pauseBtn.addEventListener("click", pause);
     stopBtn.addEventListener("click", stopSpeaking);
 
-    // Page hide: stop so audio doesn't leak across tabs on mobile
     document.addEventListener("visibilitychange", function () {
       if (document.hidden && (speaking || isPaused)) {
         stopSpeaking();
