@@ -32,6 +32,7 @@
   var downloadCancelBtn = document.getElementById("download-cancel");
   var downloadConfirmBtn = document.getElementById("download-confirm");
   var downloadHintEl = document.getElementById("download-hint");
+  var shareBtn = document.getElementById("share");
 
   /** "elevenlabs" | "webspeech" */
   var mode = "webspeech";
@@ -120,14 +121,14 @@
     } else {
       playBtn.textContent = isPaused ? "Resume" : "Play";
     }
+    var canExport =
+      mode === "elevenlabs" &&
+      elevenLabsAvailable &&
+      hasText &&
+      hasElVoice &&
+      !downloading;
     if (downloadBtn) {
-      var canDownload =
-        mode === "elevenlabs" &&
-        elevenLabsAvailable &&
-        hasText &&
-        hasElVoice &&
-        !downloading;
-      downloadBtn.disabled = !canDownload;
+      downloadBtn.disabled = !canExport;
       if (mode !== "elevenlabs") {
         downloadBtn.title = "Download needs ElevenLabs (device voices can’t export a clean file)";
       } else if (!hasText) {
@@ -137,24 +138,32 @@
       } else if (downloading) {
         downloadBtn.title = "Downloading…";
       } else {
-        downloadBtn.title = isTouchUi()
-          ? "Save / Share ElevenLabs speech as an MP3"
-          : "Save ElevenLabs speech as an MP3";
+        downloadBtn.title = "Download a raw MP3 (Files → Downloads on iPhone)";
       }
-      var touchUi = isTouchUi();
-      var idleLabel = touchUi ? "Save / Share" : "Download";
-      downloadBtn.textContent = downloading ? "Saving…" : idleLabel;
+      downloadBtn.textContent = downloading ? "Downloading…" : "Download MP3";
       if (downloadConfirmBtn) {
-        downloadConfirmBtn.textContent = touchUi ? "Save / Share" : "Download";
+        downloadConfirmBtn.textContent = "Download MP3";
       }
-      if (downloadHintEl) {
-        var showHint =
-          touchUi &&
-          mode === "elevenlabs" &&
-          elevenLabsAvailable &&
-          !downloading;
-        downloadHintEl.hidden = !showHint;
+    }
+    if (shareBtn) {
+      shareBtn.disabled = !canExport;
+      if (mode !== "elevenlabs") {
+        shareBtn.title = "Share needs ElevenLabs";
+      } else if (!hasText) {
+        shareBtn.title = "Add text to share";
+      } else if (!hasElVoice) {
+        shareBtn.title = "Pick an ElevenLabs voice";
+      } else if (downloading) {
+        shareBtn.title = "Busy…";
+      } else {
+        shareBtn.title = "Share MP3 (AirDrop, Drive, or Save to Files)";
       }
+      shareBtn.textContent = "Share…";
+    }
+    if (downloadHintEl) {
+      var showHint =
+        mode === "elevenlabs" && elevenLabsAvailable && !downloading;
+      downloadHintEl.hidden = !showHint;
     }
   }
 
@@ -203,7 +212,7 @@
     if (mode === "elevenlabs") {
       if (hintEl) {
         hintEl.textContent =
-          "ElevenLabs selected — natural cloud voices. Use Download to save an MP3 (name the file first). Changing voice plays a short sample.";
+          "ElevenLabs selected — natural cloud voices. Use Download MP3 for a raw file, or Share… for AirDrop/Drive/Save to Files. Changing voice plays a short sample.";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -212,7 +221,7 @@
     } else {
       if (hintEl) {
         hintEl.textContent =
-          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Download is for ElevenLabs only (Web Speech can’t export a clean MP3).";
+          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Download MP3 is for ElevenLabs only (Web Speech can’t export a clean file).";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -874,20 +883,51 @@
   }
 
   /**
-   * Prefer Web Share (files) on mobile, then <a download>, then blob tab.
-   * Returns Promise<{ method: "share"|"anchor"|"tab"|"cancelled" }>.
+   * Hidden form POST to /api/download so Safari navigates to an attachment
+   * response (Content-Disposition) — more reliable than <a download> on iOS.
    */
-  function triggerBlobDownload(blob, filename) {
-    var mpegBlob = ensureMpegBlob(blob);
+  function submitDownloadForm(text, voiceId, rate, filename) {
+    var form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/download";
+    form.target = "_blank";
+    form.enctype = "application/x-www-form-urlencoded";
+    form.acceptCharset = "UTF-8";
+    form.style.display = "none";
+    form.setAttribute("aria-hidden", "true");
 
-    function fallback() {
-      // Desktop / Android usually honor download=; iOS needs tab + Share.
-      if (!isIOSLike()) {
-        return Promise.resolve(triggerAnchorDownload(mpegBlob, filename));
-      }
-      return Promise.resolve(openBlobTab(mpegBlob));
+    function addField(name, value) {
+      var input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value == null ? "" : String(value);
+      form.appendChild(input);
     }
 
+    addField("text", text);
+    addField("voiceId", voiceId);
+    addField("rate", rate);
+    addField("filename", filename);
+
+    document.body.appendChild(form);
+    try {
+      form.submit();
+    } finally {
+      setTimeout(function () {
+        try {
+          document.body.removeChild(form);
+        } catch (e) {}
+      }, 2000);
+    }
+    return { method: "form" };
+  }
+
+  /**
+   * Web Share with an MP3 File (AirDrop / Drive / Save to Files).
+   * Returns Promise<{ method: "share"|"cancelled"|"fallback" }>.
+   */
+  function triggerWebShare(blob, filename) {
+    var mpegBlob = ensureMpegBlob(blob);
     try {
       if (typeof File !== "undefined" && navigator.share && navigator.canShare) {
         var file = new File([mpegBlob], filename, { type: "audio/mpeg" });
@@ -899,21 +939,33 @@
               return { method: "share" };
             })
             .catch(function (err) {
-              // User dismissed the sheet — not an error.
               if (err && err.name === "AbortError") {
                 return { method: "cancelled" };
               }
-              // Share unavailable in this gesture / context — fall back.
-              return fallback();
+              return { method: "fallback" };
             });
         }
       }
     } catch (e) {}
-
-    return fallback();
+    return Promise.resolve({ method: "fallback" });
   }
 
-  function askFilename(defaultName) {
+  function iosDownloadStatus(filename) {
+    return (
+      "Downloading MP3… If nothing appears: check Files → Downloads (or On My iPhone). " +
+      "If a player tab opens: tap Share → Save to Files. " +
+      "(" +
+      filename +
+      ")"
+    );
+  }
+
+  function askFilename(defaultName, options) {
+    options = options || {};
+    var title = options.title || "Download MP3 as";
+    var confirmLabel = options.confirmLabel || "Download MP3";
+    var titleEl = document.getElementById("download-dialog-title");
+
     return new Promise(function (resolve) {
       if (!downloadDialog || !downloadNameEl || !downloadForm) {
         var fallback = window.prompt("File name for the MP3:", defaultName);
@@ -950,6 +1002,8 @@
         finish(null);
       }
 
+      if (titleEl) titleEl.textContent = title;
+      if (downloadConfirmBtn) downloadConfirmBtn.textContent = confirmLabel;
       downloadNameEl.value = defaultName;
       downloadForm.addEventListener("submit", onSubmit);
       if (downloadCancelBtn) {
@@ -999,9 +1053,83 @@
     }
 
     var suggested = sanitizeFilename(suggestDownloadName(text));
+    askFilename(suggested.replace(/\.mp3$/i, "")).then(function (filename) {
+      if (!filename) {
+        setDownloadStatus("Cancelled", "muted");
+        return;
+      }
+      filename = sanitizeFilename(filename);
+      var rate = currentElRate();
+      var cacheKey = elAudioKey(text, voiceId, rate);
+      var hasCached = !!(lastElBlob && lastElKey === cacheKey);
+
+      downloading = true;
+      setControls();
+
+      // iOS: browser navigation to Content-Disposition attachment is the
+      // reliable raw-file path (<a download> is flaky in Safari).
+      if (isIOSLike()) {
+        setDownloadStatus(iosDownloadStatus(filename), "muted");
+        submitDownloadForm(text, voiceId, rate, filename);
+        // Also try blob+download when Play already cached the same audio —
+        // harmless if Safari ignores it; helps when it works.
+        if (hasCached) {
+          try {
+            triggerAnchorDownload(lastElBlob, filename);
+          } catch (e) {}
+        }
+        downloading = false;
+        setControls();
+        return;
+      }
+
+      // Desktop / Android: prefer cached Play blob + <a download>; else form POST.
+      if (hasCached) {
+        setDownloadStatus("Downloading MP3…", "muted");
+        var result = triggerAnchorDownload(lastElBlob, filename);
+        downloading = false;
+        setControls();
+        if (result && result.method === "anchor") {
+          setDownloadStatus("Saved · " + filename, "ok");
+        } else {
+          setDownloadStatus("Downloading MP3… check your Downloads folder", "muted");
+        }
+        return;
+      }
+
+      setDownloadStatus("Downloading MP3…", "muted");
+      submitDownloadForm(text, voiceId, rate, filename);
+      downloading = false;
+      setControls();
+      setDownloadStatus(
+        "Downloading MP3… If nothing appears, use Share… → Save to Files",
+        "muted"
+      );
+    });
+  }
+
+  function shareAudio() {
+    if (downloading) return;
+    if (mode !== "elevenlabs" || !elevenLabsAvailable) {
+      setDownloadStatus("Share needs ElevenLabs — switch source above.", "muted");
+      return;
+    }
+    var text = textEl.value.trim();
+    var voiceId = voiceEl.value;
+    if (!text || !voiceId) {
+      setDownloadStatus("Add text and pick a voice first.", "muted");
+      return;
+    }
+    if (text.length > MAX_TTS_CHARS) {
+      setDownloadStatus(
+        "Text too long (max " + MAX_TTS_CHARS + " characters).",
+        "error"
+      );
+      return;
+    }
+
+    var suggested = sanitizeFilename(suggestDownloadName(text));
     // Start TTS while Cap names the file so Share can run in the confirm gesture.
-    // Prefer the MP3 from the last successful Play when text/voice/rate match —
-    // no mic/speaker recording; ElevenLabs already returned a clean blob on Play.
     downloading = true;
     setControls();
     var rate = currentElRate();
@@ -1018,22 +1146,24 @@
       });
     }
 
-    askFilename(suggested.replace(/\.mp3$/i, "")).then(function (filename) {
+    askFilename(suggested.replace(/\.mp3$/i, ""), {
+      title: "Share MP3 as",
+      confirmLabel: "Share…",
+    }).then(function (filename) {
       if (!filename) {
         downloading = false;
         setControls();
         setDownloadStatus("Cancelled", "muted");
-        // Dialog cancelled — ignore in-flight TTS (may still finish server-side).
         ttsPromise.catch(function () {});
         return;
       }
       filename = sanitizeFilename(filename);
-      setDownloadStatus("Saving…", "muted");
+      setDownloadStatus("Opening share sheet…", "muted");
 
       ttsPromise
         .then(function (blob) {
-          return triggerBlobDownload(blob, filename).then(function (result) {
-            return { result: result, filename: filename };
+          return triggerWebShare(blob, filename).then(function (result) {
+            return { result: result, filename: filename, blob: blob };
           });
         })
         .then(function (payload) {
@@ -1043,33 +1173,34 @@
           var name = payload.filename;
           if (result.method === "share") {
             setDownloadStatus(
-              "Share sheet opened — pick Save to Files",
-              "muted"
-            );
-          } else if (result.method === "anchor") {
-            setDownloadStatus("Saved · " + name, "ok");
-          } else if (result.method === "tab") {
-            setDownloadStatus(
-              "Audio opened in a new tab — tap Share → Save to Files",
+              "Share sheet opened — Save to Files keeps a raw MP3 in Apple Files (or pick Drive/AirDrop)",
               "muted"
             );
           } else if (result.method === "cancelled") {
             setDownloadStatus("Cancelled", "muted");
           } else {
-            setDownloadStatus("Saved · " + name, "ok");
+            // Share unavailable — fall back to true download form / anchor.
+            if (isIOSLike()) {
+              setDownloadStatus(iosDownloadStatus(name), "muted");
+              submitDownloadForm(text, voiceId, rate, name);
+            } else {
+              triggerAnchorDownload(payload.blob, name);
+              setDownloadStatus("Saved · " + name, "ok");
+            }
           }
         })
         .catch(function (err) {
           downloading = false;
           setControls();
           setDownloadStatus(
-            (err && err.message) || "Download failed — try again.",
+            (err && err.message) || "Share failed — try Download MP3.",
             "error"
           );
         });
     });
   }
 
+  /* ---------- Shared controls ---------- */
   /* ---------- Shared controls ---------- */
 
   function saveRate() {
@@ -1212,6 +1343,9 @@
     stopBtn.addEventListener("click", stopSpeaking);
     if (downloadBtn) {
       downloadBtn.addEventListener("click", downloadAudio);
+    }
+    if (shareBtn) {
+      shareBtn.addEventListener("click", shareAudio);
     }
 
     if (sourceElBtn) {

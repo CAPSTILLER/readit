@@ -97,19 +97,25 @@
         <button type="button" id="stop" class="btn btn-secondary" disabled>
           Stop
         </button>
-        <button type="button" id="download" class="btn btn-secondary btn-download" disabled title="Download needs ElevenLabs">
-          Download
+      </div>
+
+      <div class="export-controls" role="group" aria-label="Export MP3">
+        <button type="button" id="download" class="btn btn-primary btn-download" disabled title="Download needs ElevenLabs">
+          Download MP3
+        </button>
+        <button type="button" id="share" class="btn btn-secondary btn-share" disabled title="Share needs ElevenLabs">
+          Share…
         </button>
       </div>
       <p id="download-status" class="download-status" aria-live="polite" hidden></p>
       <p id="download-hint" class="download-hint" hidden>
-        On iPhone: Share → Save to Files
+        Download MP3 saves a raw file. On iPhone check Files → Downloads (or On My iPhone). Share → Save to Files also stores a raw MP3 in Apple Files.
       </p>
     </main>
 
     <dialog id="download-dialog" class="modal" aria-labelledby="download-dialog-title">
       <form method="dialog" id="download-form" class="modal-body">
-        <h2 id="download-dialog-title" class="modal-title">Save audio as</h2>
+        <h2 id="download-dialog-title" class="modal-title">Download MP3 as</h2>
         <label class="modal-label" for="download-name">File name</label>
         <input
           id="download-name"
@@ -120,10 +126,10 @@
           spellcheck="false"
           enterkeyhint="done"
         />
-        <p class="modal-hint">Letters, numbers, spaces, - and _ · .mp3 added if missing. On iPhone the share sheet opens so you can Save to Files.</p>
+        <p class="modal-hint">Letters, numbers, spaces, - and _ · .mp3 added if missing. Download saves a raw file; Share → Save to Files also puts a raw MP3 in Apple Files.</p>
         <div class="modal-actions">
           <button type="submit" value="ok" class="btn btn-primary" id="download-confirm">
-            Download
+            Download MP3
           </button>
           <button type="button" class="btn btn-secondary" id="download-cancel">
             Cancel
