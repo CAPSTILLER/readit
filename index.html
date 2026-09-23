@@ -53,6 +53,15 @@
 
       <div class="field">
         <label for="voice">Voice</label>
+        <div class="voice-source" role="group" aria-label="Voice source">
+          <button type="button" id="source-elevenlabs" class="btn btn-source btn-source-primary" aria-pressed="false">
+            ElevenLabs voices
+          </button>
+          <button type="button" id="source-device" class="btn btn-source btn-source-secondary" aria-pressed="false">
+            Device voices
+          </button>
+        </div>
+        <p id="source-note" class="source-note" hidden></p>
         <select id="voice" class="select" disabled>
           <option value="">Loading voices…</option>
         </select>
@@ -92,11 +101,11 @@
     </main>
 
     <p class="hint" id="voice-hint">
-      Loading voices… Prefer natural ElevenLabs when available; otherwise your device voices.
+      Pick a source above, then a voice from that list. ElevenLabs is natural cloud speech; Device uses voices on this phone or computer.
     </p>
 
     <footer class="footer">
-      <p>ElevenLabs when configured on the server; otherwise Web Speech on your device.</p>
+      <p>Two sources: ElevenLabs (cloud) or Device (Web Speech). Only one list at a time — less clutter.</p>
     </footer>
   </div>
   <script src="app.js"></script>

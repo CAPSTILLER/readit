@@ -3,6 +3,7 @@
 
   var STORAGE_KEY = "readit-voice-uri";
   var EL_STORAGE_KEY = "readit-el-voice-id";
+  var SOURCE_KEY = "readit-voice-source";
   var RATE_KEY = "readit-rate";
   var PREVIEW =
     "Hey Cap. This is how I sound with the voice you picked.";
@@ -19,6 +20,9 @@
   var unsupportedEl = document.getElementById("unsupported");
   var hintEl = document.getElementById("voice-hint");
   var footerEl = document.querySelector(".footer p");
+  var sourceElBtn = document.getElementById("source-elevenlabs");
+  var sourceDeviceBtn = document.getElementById("source-device");
+  var sourceNoteEl = document.getElementById("source-note");
 
   /** "elevenlabs" | "webspeech" */
   var mode = "webspeech";
@@ -32,6 +36,9 @@
   var audioEl = null;
   var audioUrl = null;
   var elVoices = [];
+  var elevenLabsAvailable = false;
+  var elUnavailableReason = "";
+  var deviceVoicesWired = false;
 
   function speechAvailable() {
     return (
@@ -82,29 +89,70 @@
     }
   }
 
-  function setModeCopy() {
-    if (mode === "elevenlabs") {
-      if (hintEl) {
-        hintEl.textContent =
-          "Natural ElevenLabs voices. Changing voice plays a short sample. Speed is applied on the next Play.";
+  function saveSource() {
+    var value = mode === "elevenlabs" ? "elevenlabs" : "device";
+    try {
+      localStorage.setItem(SOURCE_KEY, value);
+    } catch (e) {}
+  }
+
+  function loadSavedSource() {
+    try {
+      var s = localStorage.getItem(SOURCE_KEY);
+      if (s === "elevenlabs" || s === "device") return s;
+    } catch (e) {}
+    return null;
+  }
+
+  function updateSourceButtons() {
+    var elActive = mode === "elevenlabs";
+    if (sourceElBtn) {
+      sourceElBtn.setAttribute("aria-pressed", elActive ? "true" : "false");
+      sourceElBtn.disabled = !elevenLabsAvailable;
+      if (!elevenLabsAvailable) {
+        sourceElBtn.title = elUnavailableReason || "ElevenLabs unavailable";
+      } else {
+        sourceElBtn.removeAttribute("title");
       }
-      if (footerEl) {
-        footerEl.textContent =
-          "Voices via ElevenLabs (server-side). Falls back to device voices if unavailable.";
-      }
-    } else {
-      if (hintEl) {
-        hintEl.textContent =
-          "Tip: pick a voice tagged “clearer” (Google / Neural / Enhanced). Changing voice plays a short sample. Device voices — ElevenLabs unavailable here (missing key or API error).";
-      }
-      if (footerEl) {
-        footerEl.textContent =
-          "Uses your device’s voices (Web Speech API) — no account needed.";
+    }
+    if (sourceDeviceBtn) {
+      sourceDeviceBtn.setAttribute("aria-pressed", elActive ? "false" : "true");
+      sourceDeviceBtn.disabled = false;
+    }
+    if (sourceNoteEl) {
+      if (!elevenLabsAvailable && elUnavailableReason) {
+        sourceNoteEl.hidden = false;
+        sourceNoteEl.textContent = elUnavailableReason;
+      } else {
+        sourceNoteEl.hidden = true;
+        sourceNoteEl.textContent = "";
       }
     }
   }
 
-  /* ---------- Web Speech helpers (fallback) ---------- */
+  function setModeCopy() {
+    if (mode === "elevenlabs") {
+      if (hintEl) {
+        hintEl.textContent =
+          "ElevenLabs selected — natural cloud voices. Use Device voices for offline / on-this-device speech. Changing voice plays a short sample.";
+      }
+      if (footerEl) {
+        footerEl.textContent =
+          "Source: ElevenLabs (cloud). Tap Device voices for the smaller on-device list.";
+      }
+    } else {
+      if (hintEl) {
+        hintEl.textContent =
+          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Tap ElevenLabs voices for the natural cloud list when available.";
+      }
+      if (footerEl) {
+        footerEl.textContent =
+          "Source: Device (Web Speech). Tap ElevenLabs voices for cloud speech when the server is ready.";
+      }
+    }
+  }
+
+  /* ---------- Web Speech helpers (device) ---------- */
 
   function voiceQuality(v) {
     var n = (v.name || "").toLowerCase();
@@ -155,6 +203,7 @@
 
   function populateWebSpeechVoices(force) {
     if (!speechAvailable()) return;
+    if (mode !== "webspeech") return;
 
     var list = window.speechSynthesis.getVoices() || [];
     var fp = fingerprint(list);
@@ -341,7 +390,7 @@
   }
 
   function populateElevenVoices(list) {
-    elVoices = list || [];
+    if (list) elVoices = list;
     voiceEl.innerHTML = "";
 
     if (!elVoices.length) {
@@ -532,6 +581,49 @@
     playEleven(PREVIEW);
   }
 
+  /* ---------- Source switching ---------- */
+
+  function stopAll() {
+    stopEleven();
+    stopWebSpeech();
+  }
+
+  function applySource(source, persist) {
+    stopAll();
+
+    if (source === "elevenlabs" && elevenLabsAvailable) {
+      mode = "elevenlabs";
+      unsupportedEl.hidden = true;
+      populateElevenVoices();
+    } else {
+      mode = "webspeech";
+      if (!speechAvailable()) {
+        unsupportedEl.hidden = false;
+        playBtn.disabled = true;
+        pauseBtn.disabled = true;
+        stopBtn.disabled = true;
+        voiceEl.disabled = true;
+        voiceEl.innerHTML = '<option value="">Unavailable</option>';
+      } else {
+        unsupportedEl.hidden = true;
+        populateWebSpeechVoices(true);
+      }
+    }
+
+    updateSourceButtons();
+    setModeCopy();
+    if (persist !== false) saveSource();
+    setControls();
+  }
+
+  function pickInitialSource() {
+    var saved = loadSavedSource();
+    if (saved === "elevenlabs" && elevenLabsAvailable) return "elevenlabs";
+    if (saved === "device") return "device";
+    if (elevenLabsAvailable) return "elevenlabs";
+    return "device";
+  }
+
   /* ---------- Shared controls ---------- */
 
   function saveRate() {
@@ -605,22 +697,9 @@
     speakWebSpeech(PREVIEW, true);
   }
 
-  function initWebSpeechFallback() {
-    mode = "webspeech";
-    setModeCopy();
-
-    if (!speechAvailable()) {
-      unsupportedEl.hidden = false;
-      playBtn.disabled = true;
-      pauseBtn.disabled = true;
-      stopBtn.disabled = true;
-      voiceEl.disabled = true;
-      voiceEl.innerHTML = '<option value="">Unavailable</option>';
-      return;
-    }
-
-    unsupportedEl.hidden = true;
-    populateWebSpeechVoices(true);
+  function wireDeviceVoices() {
+    if (deviceVoicesWired || !speechAvailable()) return;
+    deviceVoicesWired = true;
 
     if (typeof window.speechSynthesis.addEventListener === "function") {
       window.speechSynthesis.addEventListener("voiceschanged", function () {
@@ -634,30 +713,41 @@
 
     var tries = 0;
     var poll = setInterval(function () {
-      if (mode !== "webspeech") {
-        clearInterval(poll);
-        return;
-      }
       tries += 1;
-      populateWebSpeechVoices(false);
-      if (voices.length || tries > 20) clearInterval(poll);
+      if (mode === "webspeech") populateWebSpeechVoices(false);
+      if ((voices.length && mode === "webspeech") || tries > 20) clearInterval(poll);
     }, 250);
   }
 
-  function tryElevenLabs() {
+  function fetchElevenVoices() {
     return fetch("/api/voices", { headers: { Accept: "application/json" } })
       .then(function (res) {
-        if (!res.ok) throw new Error("voices " + res.status);
+        if (res.status === 503) {
+          throw new Error("ElevenLabs not configured on the server (missing API key).");
+        }
+        if (!res.ok) {
+          throw new Error("ElevenLabs voices unavailable (API error " + res.status + ").");
+        }
         return res.json();
       })
       .then(function (data) {
         var list = (data && data.voices) || [];
-        if (!list.length) throw new Error("empty voices");
-        mode = "elevenlabs";
-        setModeCopy();
-        unsupportedEl.hidden = true;
-        populateElevenVoices(list);
+        if (!list.length) {
+          throw new Error("ElevenLabs returned no voices.");
+        }
+        elVoices = list;
+        elevenLabsAvailable = true;
+        elUnavailableReason = "";
       });
+  }
+
+  function markElevenUnavailable(err) {
+    elevenLabsAvailable = false;
+    elVoices = [];
+    var msg =
+      (err && err.message) ||
+      "ElevenLabs unavailable — using device voices.";
+    elUnavailableReason = msg;
   }
 
   function wireUi() {
@@ -675,6 +765,19 @@
     pauseBtn.addEventListener("click", pause);
     stopBtn.addEventListener("click", stopSpeaking);
 
+    if (sourceElBtn) {
+      sourceElBtn.addEventListener("click", function () {
+        if (!elevenLabsAvailable || mode === "elevenlabs") return;
+        applySource("elevenlabs", true);
+      });
+    }
+    if (sourceDeviceBtn) {
+      sourceDeviceBtn.addEventListener("click", function () {
+        if (mode === "webspeech") return;
+        applySource("device", true);
+      });
+    }
+
     document.addEventListener("visibilitychange", function () {
       if (document.hidden && (speaking || isPaused || loadingTts)) {
         stopSpeaking();
@@ -690,10 +793,20 @@
     wireUi();
     voiceEl.innerHTML = '<option value="">Loading voices…</option>';
     voiceEl.disabled = true;
+    if (hintEl) {
+      hintEl.textContent = "Loading voice sources…";
+    }
 
-    tryElevenLabs().catch(function () {
-      initWebSpeechFallback();
-    });
+    wireDeviceVoices();
+
+    fetchElevenVoices()
+      .catch(function (err) {
+        markElevenUnavailable(err);
+      })
+      .then(function () {
+        // Don't overwrite a saved ElevenLabs preference if the API is briefly down.
+        applySource(pickInitialSource(), false);
+      });
   }
 
   if (document.readyState === "loading") {
