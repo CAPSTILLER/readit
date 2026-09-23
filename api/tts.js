@@ -45,10 +45,10 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: "voiceId is required" });
   }
 
-  // Map UI rate (~0.75–1.5) into ElevenLabs speed (REST allows ~0.25–4.0)
+  // ElevenLabs voice_settings.speed is limited to 0.7–1.2 (not the wider REST docs range).
   var speed = 1;
   if (!isNaN(rate) && rate > 0) {
-    speed = Math.min(1.5, Math.max(0.75, rate));
+    speed = Math.min(1.2, Math.max(0.7, rate));
   }
 
   var payload = {

@@ -13,6 +13,7 @@
   var voiceEl = document.getElementById("voice");
   var rateEl = document.getElementById("rate");
   var rateValueEl = document.getElementById("rate-value");
+  var rateMaxLabelEl = document.getElementById("rate-max-label");
   var countsEl = document.getElementById("counts");
   var playBtn = document.getElementById("play");
   var pauseBtn = document.getElementById("pause");
@@ -43,6 +44,8 @@
   var loadingTts = false;
   var downloading = false;
   var downloadStatusTimer = null;
+  var lastElBlob = null;
+  var lastElKey = null;
   var audioEl = null;
   var audioUrl = null;
   var elVoices = [];
@@ -76,6 +79,25 @@
   function updateRateLabel() {
     var r = parseFloat(rateEl.value) || 1;
     rateValueEl.textContent = r.toFixed(2) + "×";
+  }
+
+  /** ElevenLabs speed max is 1.2×; Device/Web Speech keeps 1.5×. */
+  function syncRateLimitsForMode() {
+    var elMode = mode === "elevenlabs";
+    var max = elMode ? 1.2 : 1.5;
+    rateEl.min = "0.75";
+    rateEl.max = String(max);
+    var r = parseFloat(rateEl.value);
+    if (isNaN(r)) r = 1;
+    if (r > max) r = max;
+    if (r < 0.75) r = 0.75;
+    // Snap to step so a clamped 1.3 becomes a clean slider tick.
+    r = Math.round(r / 0.05) * 0.05;
+    if (r > max) r = max;
+    rateEl.value = String(r);
+    if (rateMaxLabelEl) rateMaxLabelEl.textContent = max.toFixed(1) + "×";
+    updateRateLabel();
+    saveRate();
   }
 
   function setControls() {
@@ -552,8 +574,37 @@
     }
   }
 
-  function fetchTts(text, voiceId) {
+  function elAudioKey(text, voiceId, rate) {
+    return String(text) + "\n" + String(voiceId) + "\n" + String(rate);
+  }
+
+  function currentElRate() {
     var rate = parseFloat(rateEl.value) || 1;
+    // Mirror server clamp for ElevenLabs (0.7–1.2)
+    if (rate > 1.2) rate = 1.2;
+    if (rate < 0.7) rate = 0.7;
+    return rate;
+  }
+
+  function rememberElBlob(text, voiceId, rate, blob) {
+    lastElBlob = blob;
+    lastElKey = elAudioKey(text, voiceId, rate);
+  }
+
+  function ttsErrorMessage(err, status) {
+    var detail = "";
+    if (err) {
+      detail = String(err.detail || "") + " " + String(err.error || "");
+    }
+    if (/speed/i.test(detail) || /expected.*0\.7.*1\.2/i.test(detail)) {
+      return "Speed too fast for ElevenLabs (max 1.2×)";
+    }
+    if (err && err.error) return err.error;
+    return "TTS failed" + (status ? " (" + status + ")" : "");
+  }
+
+  function fetchTts(text, voiceId) {
+    var rate = currentElRate();
     return fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
@@ -566,7 +617,7 @@
             return { error: "TTS failed (" + res.status + ")" };
           })
           .then(function (err) {
-            throw new Error(err.error || "TTS failed");
+            throw new Error(ttsErrorMessage(err, res.status));
           });
       }
       return res.blob().then(function (blob) {
@@ -609,14 +660,18 @@
 
     fetchTts(text, voiceId)
       .then(function (blob) {
+        rememberElBlob(text, voiceId, currentElRate(), blob);
         playBlob(blob);
       })
-      .catch(function () {
+      .catch(function (err) {
         loadingTts = false;
         speaking = false;
         isPaused = false;
         setControls();
-        window.alert("Couldn’t generate speech. Try again or pick another voice.");
+        var msg =
+          (err && err.message) ||
+          "Couldn’t generate speech. Try again or pick another voice.";
+        window.alert(msg);
       });
   }
 
@@ -664,6 +719,7 @@
 
     updateSourceButtons();
     setModeCopy();
+    syncRateLimitsForMode();
     if (persist !== false) saveSource();
     setControls();
   }
@@ -944,12 +1000,23 @@
 
     var suggested = sanitizeFilename(suggestDownloadName(text));
     // Start TTS while Cap names the file so Share can run in the confirm gesture.
+    // Prefer the MP3 from the last successful Play when text/voice/rate match —
+    // no mic/speaker recording; ElevenLabs already returned a clean blob on Play.
     downloading = true;
     setControls();
-    setDownloadStatus("Preparing…", "muted");
-    var ttsPromise = fetchTts(text, voiceId).catch(function (err) {
-      return Promise.reject(err);
-    });
+    var rate = currentElRate();
+    var cacheKey = elAudioKey(text, voiceId, rate);
+    var ttsPromise;
+    if (lastElBlob && lastElKey === cacheKey) {
+      setDownloadStatus("Using audio from last Play", "muted");
+      ttsPromise = Promise.resolve(lastElBlob);
+    } else {
+      setDownloadStatus("Generating speech…", "muted");
+      ttsPromise = fetchTts(text, voiceId).then(function (blob) {
+        rememberElBlob(text, voiceId, rate, blob);
+        return blob;
+      });
+    }
 
     askFilename(suggested.replace(/\.mp3$/i, "")).then(function (filename) {
       if (!filename) {

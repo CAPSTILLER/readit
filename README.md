@@ -9,9 +9,11 @@ Built for Capstiller.
 1. Open the site (e.g. [readit.gearup.wtf](https://readit.gearup.wtf)).
 2. Paste or type text.
 3. Pick a **Voice**.
-4. Optionally adjust **Speed** (0.75×–1.5×).
+4. Optionally adjust **Speed** — **0.75×–1.2×** for ElevenLabs (API limit), **0.75×–1.5×** for Device voices.
 5. Tap **Play**. Use **Pause** / **Stop** as needed.
-6. With **ElevenLabs** selected, tap **Download** (on iPhone: **Save / Share**) to export an MP3 — you’ll name the file first, then use the share sheet → **Save to Files**. (Device / Web Speech voices can’t export a clean file.)
+6. With **ElevenLabs** selected, tap **Download** (on iPhone: **Save / Share**) to export an MP3 — you’ll name the file first, then use the share sheet → **Save to Files**. If you already tapped **Play**, Save reuses that MP3 when text/voice/speed match (no second generation). Device / Web Speech voices can’t export a clean file, so Download stays disabled there.
+
+We do **not** mic-record the speaker on Play. ElevenLabs already returns an MP3 blob for playback; caching that for export is higher quality and needs no mic permission. A speaker-mic hack would be noisier and still wouldn’t help Device voices.
 
 Your last voice and speed are remembered in `localStorage`.
 
