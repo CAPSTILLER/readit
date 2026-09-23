@@ -29,6 +29,8 @@
   var downloadForm = document.getElementById("download-form");
   var downloadNameEl = document.getElementById("download-name");
   var downloadCancelBtn = document.getElementById("download-cancel");
+  var downloadConfirmBtn = document.getElementById("download-confirm");
+  var downloadHintEl = document.getElementById("download-hint");
 
   /** "elevenlabs" | "webspeech" */
   var mode = "webspeech";
@@ -113,9 +115,24 @@
       } else if (downloading) {
         downloadBtn.title = "Downloading…";
       } else {
-        downloadBtn.title = "Save ElevenLabs speech as an MP3";
+        downloadBtn.title = isTouchUi()
+          ? "Save / Share ElevenLabs speech as an MP3"
+          : "Save ElevenLabs speech as an MP3";
       }
-      downloadBtn.textContent = downloading ? "Downloading…" : "Download";
+      var touchUi = isTouchUi();
+      var idleLabel = touchUi ? "Save / Share" : "Download";
+      downloadBtn.textContent = downloading ? "Saving…" : idleLabel;
+      if (downloadConfirmBtn) {
+        downloadConfirmBtn.textContent = touchUi ? "Save / Share" : "Download";
+      }
+      if (downloadHintEl) {
+        var showHint =
+          touchUi &&
+          mode === "elevenlabs" &&
+          elevenLabsAvailable &&
+          !downloading;
+        downloadHintEl.hidden = !showHint;
+      }
     }
   }
 
@@ -552,7 +569,12 @@
             throw new Error(err.error || "TTS failed");
           });
       }
-      return res.blob();
+      return res.blob().then(function (blob) {
+        if (blob && typeof blob.type === "string" && blob.type.indexOf("audio/") === 0) {
+          return blob;
+        }
+        return new Blob([blob], { type: "audio/mpeg" });
+      });
     });
   }
 
@@ -707,59 +729,132 @@
     return stem + ".mp3";
   }
 
-  function triggerBlobDownload(blob, filename) {
-    var url = URL.createObjectURL(blob);
-    // iOS Safari often ignores <a download> — open blob in a new tab so Cap can Share/Save
-    var isIOS =
-      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    if (isIOS) {
-      var opened = null;
-      try {
-        opened = window.open(url, "_blank");
-      } catch (e) {}
-      if (!opened) {
-        // Popup blocked: fall through to anchor click
-        var aIos = document.createElement("a");
-        aIos.href = url;
-        aIos.target = "_blank";
-        aIos.rel = "noopener";
-        aIos.style.display = "none";
-        document.body.appendChild(aIos);
-        try {
-          aIos.click();
-        } catch (e2) {}
-        setTimeout(function () {
-          try {
-            document.body.removeChild(aIos);
-          } catch (e3) {}
-        }, 1000);
+  function isTouchUi() {
+    try {
+      if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) {
+        return true;
       }
-    } else {
+    } catch (e) {}
+    // iPadOS desktop UA still reports MacIntel + touch
+    if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) {
+      return true;
+    }
+    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  }
+
+  function isIOSLike() {
+    return (
+      /iPad|iPhone|iPod/.test(navigator.userAgent || "") ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+    );
+  }
+
+  function ensureMpegBlob(blob) {
+    if (blob && blob.type === "audio/mpeg") return blob;
+    return new Blob([blob], { type: "audio/mpeg" });
+  }
+
+  function revokeLater(url) {
+    setTimeout(function () {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {}
+    }, 60000);
+  }
+
+  function triggerAnchorDownload(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    try {
+      a.click();
+    } catch (e) {
+      try {
+        document.body.removeChild(a);
+      } catch (e2) {}
+      revokeLater(url);
+      return openBlobTab(url);
+    }
+    setTimeout(function () {
+      try {
+        document.body.removeChild(a);
+      } catch (e3) {}
+    }, 1000);
+    revokeLater(url);
+    return { method: "anchor" };
+  }
+
+  function openBlobTab(urlOrBlob) {
+    var url =
+      typeof urlOrBlob === "string"
+        ? urlOrBlob
+        : URL.createObjectURL(urlOrBlob);
+    var opened = null;
+    try {
+      opened = window.open(url, "_blank");
+    } catch (e) {}
+    if (!opened) {
       var a = document.createElement("a");
       a.href = url;
-      a.download = filename;
+      a.target = "_blank";
       a.rel = "noopener";
       a.style.display = "none";
       document.body.appendChild(a);
       try {
         a.click();
-      } catch (e4) {
-        try {
-          window.open(url, "_blank");
-        } catch (e5) {}
-      }
+      } catch (e2) {}
       setTimeout(function () {
         try {
           document.body.removeChild(a);
-        } catch (e6) {}
+        } catch (e3) {}
       }, 1000);
     }
-    setTimeout(function () {
-      try {
-        URL.revokeObjectURL(url);
-      } catch (e7) {}
-    }, 60000);
+    revokeLater(url);
+    return { method: "tab" };
+  }
+
+  /**
+   * Prefer Web Share (files) on mobile, then <a download>, then blob tab.
+   * Returns Promise<{ method: "share"|"anchor"|"tab"|"cancelled" }>.
+   */
+  function triggerBlobDownload(blob, filename) {
+    var mpegBlob = ensureMpegBlob(blob);
+
+    function fallback() {
+      // Desktop / Android usually honor download=; iOS needs tab + Share.
+      if (!isIOSLike()) {
+        return Promise.resolve(triggerAnchorDownload(mpegBlob, filename));
+      }
+      return Promise.resolve(openBlobTab(mpegBlob));
+    }
+
+    try {
+      if (typeof File !== "undefined" && navigator.share && navigator.canShare) {
+        var file = new File([mpegBlob], filename, { type: "audio/mpeg" });
+        var shareData = { files: [file], title: filename };
+        if (navigator.canShare(shareData)) {
+          return navigator
+            .share(shareData)
+            .then(function () {
+              return { method: "share" };
+            })
+            .catch(function (err) {
+              // User dismissed the sheet — not an error.
+              if (err && err.name === "AbortError") {
+                return { method: "cancelled" };
+              }
+              // Share unavailable in this gesture / context — fall back.
+              return fallback();
+            });
+        }
+      }
+    } catch (e) {}
+
+    return fallback();
   }
 
   function askFilename(defaultName) {
@@ -848,22 +943,54 @@
     }
 
     var suggested = sanitizeFilename(suggestDownloadName(text));
+    // Start TTS while Cap names the file so Share can run in the confirm gesture.
+    downloading = true;
+    setControls();
+    setDownloadStatus("Preparing…", "muted");
+    var ttsPromise = fetchTts(text, voiceId).catch(function (err) {
+      return Promise.reject(err);
+    });
+
     askFilename(suggested.replace(/\.mp3$/i, "")).then(function (filename) {
       if (!filename) {
-        setDownloadStatus("");
+        downloading = false;
+        setControls();
+        setDownloadStatus("Cancelled", "muted");
+        // Dialog cancelled — ignore in-flight TTS (may still finish server-side).
+        ttsPromise.catch(function () {});
         return;
       }
       filename = sanitizeFilename(filename);
-      downloading = true;
-      setControls();
-      setDownloadStatus("Downloading…", "muted");
+      setDownloadStatus("Saving…", "muted");
 
-      fetchTts(text, voiceId)
+      ttsPromise
         .then(function (blob) {
-          triggerBlobDownload(blob, filename);
+          return triggerBlobDownload(blob, filename).then(function (result) {
+            return { result: result, filename: filename };
+          });
+        })
+        .then(function (payload) {
           downloading = false;
           setControls();
-          setDownloadStatus("Saved · " + filename, "ok");
+          var result = payload.result || {};
+          var name = payload.filename;
+          if (result.method === "share") {
+            setDownloadStatus(
+              "Share sheet opened — pick Save to Files",
+              "muted"
+            );
+          } else if (result.method === "anchor") {
+            setDownloadStatus("Saved · " + name, "ok");
+          } else if (result.method === "tab") {
+            setDownloadStatus(
+              "Audio opened in a new tab — tap Share → Save to Files",
+              "muted"
+            );
+          } else if (result.method === "cancelled") {
+            setDownloadStatus("Cancelled", "muted");
+          } else {
+            setDownloadStatus("Saved · " + name, "ok");
+          }
         })
         .catch(function (err) {
           downloading = false;
@@ -876,7 +1003,7 @@
     });
   }
 
-    /* ---------- Shared controls ---------- */
+  /* ---------- Shared controls ---------- */
 
   function saveRate() {
     try {

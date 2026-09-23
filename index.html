@@ -102,6 +102,9 @@
         </button>
       </div>
       <p id="download-status" class="download-status" aria-live="polite" hidden></p>
+      <p id="download-hint" class="download-hint" hidden>
+        On iPhone: Share → Save to Files
+      </p>
     </main>
 
     <dialog id="download-dialog" class="modal" aria-labelledby="download-dialog-title">
@@ -117,7 +120,7 @@
           spellcheck="false"
           enterkeyhint="done"
         />
-        <p class="modal-hint">Letters, numbers, spaces, - and _ · .mp3 added if missing</p>
+        <p class="modal-hint">Letters, numbers, spaces, - and _ · .mp3 added if missing. On iPhone the share sheet opens so you can Save to Files.</p>
         <div class="modal-actions">
           <button type="submit" value="ok" class="btn btn-primary" id="download-confirm">
             Download

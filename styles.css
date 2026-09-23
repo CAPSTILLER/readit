@@ -292,6 +292,13 @@ body {
   font-weight: 500;
 }
 
+.download-hint {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
 .modal {
   border: 1px solid var(--border);
   border-radius: var(--radius);
