@@ -11,6 +11,7 @@ Built for Capstiller.
 3. Pick a **Voice**.
 4. Optionally adjust **Speed** (0.75×–1.5×).
 5. Tap **Play**. Use **Pause** / **Stop** as needed.
+6. With **ElevenLabs** selected, tap **Download** to save an MP3 — you’ll name the file first. (Device / Web Speech voices can’t export a clean file.)
 
 Your last voice and speed are remembered in `localStorage`.
 

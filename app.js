@@ -23,6 +23,12 @@
   var sourceElBtn = document.getElementById("source-elevenlabs");
   var sourceDeviceBtn = document.getElementById("source-device");
   var sourceNoteEl = document.getElementById("source-note");
+  var downloadBtn = document.getElementById("download");
+  var downloadStatusEl = document.getElementById("download-status");
+  var downloadDialog = document.getElementById("download-dialog");
+  var downloadForm = document.getElementById("download-form");
+  var downloadNameEl = document.getElementById("download-name");
+  var downloadCancelBtn = document.getElementById("download-cancel");
 
   /** "elevenlabs" | "webspeech" */
   var mode = "webspeech";
@@ -33,6 +39,8 @@
   var speaking = false;
   var speakTimer = null;
   var loadingTts = false;
+  var downloading = false;
+  var downloadStatusTimer = null;
   var audioEl = null;
   var audioUrl = null;
   var elVoices = [];
@@ -72,6 +80,7 @@
     var hasText = textEl.value.trim().length > 0;
     var hasVoices =
       mode === "elevenlabs" ? elVoices.length > 0 : voices.length > 0;
+    var hasElVoice = mode === "elevenlabs" && !!voiceEl.value && elVoices.length > 0;
     var canResumeEl = mode === "elevenlabs" && isPaused && audioEl && audioEl.src;
     var canPlay =
       !loadingTts &&
@@ -86,6 +95,27 @@
       playBtn.disabled = true;
     } else {
       playBtn.textContent = isPaused ? "Resume" : "Play";
+    }
+    if (downloadBtn) {
+      var canDownload =
+        mode === "elevenlabs" &&
+        elevenLabsAvailable &&
+        hasText &&
+        hasElVoice &&
+        !downloading;
+      downloadBtn.disabled = !canDownload;
+      if (mode !== "elevenlabs") {
+        downloadBtn.title = "Download needs ElevenLabs (device voices can’t export a clean file)";
+      } else if (!hasText) {
+        downloadBtn.title = "Add text to download";
+      } else if (!hasElVoice) {
+        downloadBtn.title = "Pick an ElevenLabs voice";
+      } else if (downloading) {
+        downloadBtn.title = "Downloading…";
+      } else {
+        downloadBtn.title = "Save ElevenLabs speech as an MP3";
+      }
+      downloadBtn.textContent = downloading ? "Downloading…" : "Download";
     }
   }
 
@@ -134,7 +164,7 @@
     if (mode === "elevenlabs") {
       if (hintEl) {
         hintEl.textContent =
-          "ElevenLabs selected — natural cloud voices. Use Device voices for offline / on-this-device speech. Changing voice plays a short sample.";
+          "ElevenLabs selected — natural cloud voices. Use Download to save an MP3 (name the file first). Changing voice plays a short sample.";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -143,7 +173,7 @@
     } else {
       if (hintEl) {
         hintEl.textContent =
-          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Tap ElevenLabs voices for the natural cloud list when available.";
+          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Download is for ElevenLabs only (Web Speech can’t export a clean MP3).";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -624,7 +654,229 @@
     return "device";
   }
 
-  /* ---------- Shared controls ---------- */
+  /* ---------- Download (ElevenLabs MP3) ---------- */
+
+  function setDownloadStatus(msg, kind) {
+    if (!downloadStatusEl) return;
+    if (downloadStatusTimer) {
+      clearTimeout(downloadStatusTimer);
+      downloadStatusTimer = null;
+    }
+    if (!msg) {
+      downloadStatusEl.hidden = true;
+      downloadStatusEl.textContent = "";
+      downloadStatusEl.classList.remove("is-error", "is-muted");
+      return;
+    }
+    downloadStatusEl.hidden = false;
+    downloadStatusEl.textContent = msg;
+    downloadStatusEl.classList.toggle("is-error", kind === "error");
+    downloadStatusEl.classList.toggle("is-muted", kind === "muted");
+    if (kind === "ok" || kind === "error") {
+      downloadStatusTimer = setTimeout(function () {
+        setDownloadStatus("");
+      }, 3200);
+    }
+  }
+
+  function suggestDownloadName(text) {
+    var words = (text || "")
+      .trim()
+      .replace(/[^\w\s-]+/g, "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 6);
+    if (!words.length) return "readit-audio";
+    var base = words.join(" ").slice(0, 48).trim();
+    return base || "readit-audio";
+  }
+
+  function sanitizeFilename(raw) {
+    var name = String(raw || "").trim();
+    name = name.replace(/[/\\?%*:|"<>]/g, "");
+    name = name.replace(/\.+/g, ".");
+    name = name.replace(/^\.+/, "");
+    name = name.replace(/\s+/g, " ").trim();
+    if (!name) name = "readit-audio";
+    if (!/\.mp3$/i.test(name)) name += ".mp3";
+    // Keep only letters, numbers, spaces, hyphen, underscore, and .mp3
+    var stem = name.replace(/\.mp3$/i, "");
+    stem = stem.replace(/[^a-zA-Z0-9 _-]/g, "").trim();
+    if (!stem) stem = "readit-audio";
+    stem = stem.slice(0, 100);
+    return stem + ".mp3";
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    // iOS Safari often ignores <a download> — open blob in a new tab so Cap can Share/Save
+    var isIOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (isIOS) {
+      var opened = null;
+      try {
+        opened = window.open(url, "_blank");
+      } catch (e) {}
+      if (!opened) {
+        // Popup blocked: fall through to anchor click
+        var aIos = document.createElement("a");
+        aIos.href = url;
+        aIos.target = "_blank";
+        aIos.rel = "noopener";
+        aIos.style.display = "none";
+        document.body.appendChild(aIos);
+        try {
+          aIos.click();
+        } catch (e2) {}
+        setTimeout(function () {
+          try {
+            document.body.removeChild(aIos);
+          } catch (e3) {}
+        }, 1000);
+      }
+    } else {
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } catch (e4) {
+        try {
+          window.open(url, "_blank");
+        } catch (e5) {}
+      }
+      setTimeout(function () {
+        try {
+          document.body.removeChild(a);
+        } catch (e6) {}
+      }, 1000);
+    }
+    setTimeout(function () {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e7) {}
+    }, 60000);
+  }
+
+  function askFilename(defaultName) {
+    return new Promise(function (resolve) {
+      if (!downloadDialog || !downloadNameEl || !downloadForm) {
+        var fallback = window.prompt("File name for the MP3:", defaultName);
+        if (fallback == null) {
+          resolve(null);
+          return;
+        }
+        resolve(sanitizeFilename(fallback));
+        return;
+      }
+
+      var settled = false;
+      function finish(value) {
+        if (settled) return;
+        settled = true;
+        downloadForm.removeEventListener("submit", onSubmit);
+        if (downloadCancelBtn) {
+          downloadCancelBtn.removeEventListener("click", onCancel);
+        }
+        downloadDialog.removeEventListener("cancel", onCancel);
+        try {
+          if (downloadDialog.open) downloadDialog.close();
+        } catch (e) {}
+        resolve(value);
+      }
+
+      function onSubmit(ev) {
+        ev.preventDefault();
+        finish(sanitizeFilename(downloadNameEl.value));
+      }
+
+      function onCancel(ev) {
+        if (ev) ev.preventDefault();
+        finish(null);
+      }
+
+      downloadNameEl.value = defaultName;
+      downloadForm.addEventListener("submit", onSubmit);
+      if (downloadCancelBtn) {
+        downloadCancelBtn.addEventListener("click", onCancel);
+      }
+      downloadDialog.addEventListener("cancel", onCancel);
+
+      try {
+        if (typeof downloadDialog.showModal === "function") {
+          downloadDialog.showModal();
+        } else {
+          downloadDialog.setAttribute("open", "");
+        }
+      } catch (e) {
+        var fallback2 = window.prompt("File name for the MP3:", defaultName);
+        finish(fallback2 == null ? null : sanitizeFilename(fallback2));
+        return;
+      }
+
+      setTimeout(function () {
+        try {
+          downloadNameEl.focus();
+          downloadNameEl.select();
+        } catch (e) {}
+      }, 30);
+    });
+  }
+
+  function downloadAudio() {
+    if (downloading) return;
+    if (mode !== "elevenlabs" || !elevenLabsAvailable) {
+      setDownloadStatus("Download needs ElevenLabs — switch source above.", "muted");
+      return;
+    }
+    var text = textEl.value.trim();
+    var voiceId = voiceEl.value;
+    if (!text || !voiceId) {
+      setDownloadStatus("Add text and pick a voice first.", "muted");
+      return;
+    }
+    if (text.length > MAX_TTS_CHARS) {
+      setDownloadStatus(
+        "Text too long (max " + MAX_TTS_CHARS + " characters).",
+        "error"
+      );
+      return;
+    }
+
+    var suggested = sanitizeFilename(suggestDownloadName(text));
+    askFilename(suggested.replace(/\.mp3$/i, "")).then(function (filename) {
+      if (!filename) {
+        setDownloadStatus("");
+        return;
+      }
+      filename = sanitizeFilename(filename);
+      downloading = true;
+      setControls();
+      setDownloadStatus("Downloading…", "muted");
+
+      fetchTts(text, voiceId)
+        .then(function (blob) {
+          triggerBlobDownload(blob, filename);
+          downloading = false;
+          setControls();
+          setDownloadStatus("Saved · " + filename, "ok");
+        })
+        .catch(function (err) {
+          downloading = false;
+          setControls();
+          setDownloadStatus(
+            (err && err.message) || "Download failed — try again.",
+            "error"
+          );
+        });
+    });
+  }
+
+    /* ---------- Shared controls ---------- */
 
   function saveRate() {
     try {
@@ -764,6 +1016,9 @@
     playBtn.addEventListener("click", play);
     pauseBtn.addEventListener("click", pause);
     stopBtn.addEventListener("click", stopSpeaking);
+    if (downloadBtn) {
+      downloadBtn.addEventListener("click", downloadAudio);
+    }
 
     if (sourceElBtn) {
       sourceElBtn.addEventListener("click", function () {

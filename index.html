@@ -97,8 +97,37 @@
         <button type="button" id="stop" class="btn btn-secondary" disabled>
           Stop
         </button>
+        <button type="button" id="download" class="btn btn-secondary btn-download" disabled title="Download needs ElevenLabs">
+          Download
+        </button>
       </div>
+      <p id="download-status" class="download-status" aria-live="polite" hidden></p>
     </main>
+
+    <dialog id="download-dialog" class="modal" aria-labelledby="download-dialog-title">
+      <form method="dialog" id="download-form" class="modal-body">
+        <h2 id="download-dialog-title" class="modal-title">Save audio as</h2>
+        <label class="modal-label" for="download-name">File name</label>
+        <input
+          id="download-name"
+          class="modal-input"
+          type="text"
+          maxlength="120"
+          autocomplete="off"
+          spellcheck="false"
+          enterkeyhint="done"
+        />
+        <p class="modal-hint">Letters, numbers, spaces, - and _ · .mp3 added if missing</p>
+        <div class="modal-actions">
+          <button type="submit" value="ok" class="btn btn-primary" id="download-confirm">
+            Download
+          </button>
+          <button type="button" class="btn btn-secondary" id="download-cancel">
+            Cancel
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <p class="hint" id="voice-hint">
       Pick a source above, then a voice from that list. ElevenLabs is natural cloud speech; Device uses voices on this phone or computer.
