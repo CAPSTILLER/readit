@@ -111,6 +111,15 @@
       <p id="download-hint" class="download-hint" hidden>
         Download MP3 saves a raw file. On iPhone check Files → Downloads (or On My iPhone). Share → Save to Files also stores a raw MP3 in Apple Files.
       </p>
+
+      <section id="clips" class="clips" aria-labelledby="clips-title" hidden>
+        <div class="clips-head">
+          <h2 id="clips-title" class="clips-title">This session</h2>
+          <button type="button" id="clips-clear" class="btn btn-secondary btn-clear">Clear all</button>
+        </div>
+        <p class="clips-note">Clips stay until you close the app.</p>
+        <ul id="clips-list" class="clips-list"></ul>
+      </section>
     </main>
 
     <dialog id="download-dialog" class="modal" aria-labelledby="download-dialog-title">
@@ -146,6 +155,7 @@
       <p>Two sources: ElevenLabs (cloud) or Device (Web Speech). Only one list at a time — less clutter.</p>
     </footer>
   </div>
+  <script src="clips.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

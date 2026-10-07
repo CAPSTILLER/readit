@@ -45,8 +45,17 @@
   var loadingTts = false;
   var downloading = false;
   var downloadStatusTimer = null;
-  var lastElBlob = null;
-  var lastElKey = null;
+  var Clips = window.ReaditClips;
+  var clipStore = Clips.createClipStore({ onChange: renderClips });
+  /** Clip currently loaded in audioEl (ElevenLabs MP3). */
+  var currentClipId = null;
+  /** Device clip currently being re-spoken. */
+  var speakingClipId = null;
+  /** True while audioEl (MP3) is the active player, whatever the source mode. */
+  var audioActive = false;
+  var clipsSection = document.getElementById("clips");
+  var clipsList = document.getElementById("clips-list");
+  var clipsClearBtn = document.getElementById("clips-clear");
   var audioEl = null;
   var audioUrl = null;
   var elVoices = [];
@@ -106,13 +115,14 @@
     var hasVoices =
       mode === "elevenlabs" ? elVoices.length > 0 : voices.length > 0;
     var hasElVoice = mode === "elevenlabs" && !!voiceEl.value && elVoices.length > 0;
-    var canResumeEl = mode === "elevenlabs" && isPaused && audioEl && audioEl.src;
+    var canResumeEl = audioActive && isPaused && audioEl && audioEl.src;
     var canPlay =
       !loadingTts &&
       hasVoices &&
       (canResumeEl ||
         (hasText && (mode === "elevenlabs" || speechAvailable())));
     playBtn.disabled = !canPlay;
+    renderClipStates();
     pauseBtn.disabled = !speaking || loadingTts;
     stopBtn.disabled = !speaking && !isPaused && !loadingTts;
     if (loadingTts) {
@@ -212,7 +222,7 @@
     if (mode === "elevenlabs") {
       if (hintEl) {
         hintEl.textContent =
-          "ElevenLabs selected — natural cloud voices. Use Download MP3 for a raw file, or Share… for AirDrop/Drive/Save to Files. Changing voice plays a short sample.";
+          "ElevenLabs selected — natural cloud voices. Every clip you play is kept under This session, so you can replay or export it without using more credits. Changing voice plays a short sample.";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -221,7 +231,7 @@
     } else {
       if (hintEl) {
         hintEl.textContent =
-          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Download MP3 is for ElevenLabs only (Web Speech can’t export a clean file).";
+          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Device clips replay for free under This session, but MP3 export is ElevenLabs only (device voices can’t make a file).";
       }
       if (footerEl) {
         footerEl.textContent =
@@ -386,7 +396,17 @@
     utterance = null;
     speaking = false;
     isPaused = false;
+    speakingClipId = null;
     setControls();
+  }
+
+  function findDeviceVoice(key) {
+    if (!speechAvailable() || !key) return null;
+    var list = window.speechSynthesis.getVoices() || [];
+    for (var i = 0; i < list.length; i++) {
+      if (voiceKey(list[i]) === key) return list[i];
+    }
+    return null;
   }
 
   function stopWebSpeech() {
@@ -407,9 +427,15 @@
     if (v.lang) utt.lang = v.lang;
   }
 
-  function speakWebSpeech(text, fromGesture) {
+  /**
+   * opts (optional): { voice, rate, clipId } — used to replay a device clip
+   * with the voice/speed it was first spoken with.
+   */
+  function speakWebSpeech(text, fromGesture, opts) {
+    opts = opts || {};
     if (!speechAvailable()) return;
     if (!text) return;
+    if (audioActive) stopEleven();
 
     if (speakTimer) {
       clearTimeout(speakTimer);
@@ -419,10 +445,11 @@
     window.speechSynthesis.cancel();
 
     function start() {
-      utterance = new SpeechSynthesisUtterance(text);
-      var v = selectedWebSpeechVoice();
+      var u = new SpeechSynthesisUtterance(text);
+      utterance = u;
+      var v = opts.voice || selectedWebSpeechVoice();
       applyVoice(utterance, v);
-      utterance.rate = parseFloat(rateEl.value) || 1;
+      utterance.rate = opts.rate || parseFloat(rateEl.value) || 1;
       utterance.pitch = 1.02;
       utterance.volume = 1;
 
@@ -431,15 +458,17 @@
         isPaused = false;
         setControls();
       };
+      // Ignore late end/error events from an utterance we already replaced.
       utterance.onend = function () {
-        clearUtterance();
+        if (utterance === u) clearUtterance();
       };
       utterance.onerror = function () {
-        clearUtterance();
+        if (utterance === u) clearUtterance();
       };
 
       speaking = true;
       isPaused = false;
+      speakingClipId = opts.clipId || null;
       setControls();
       window.speechSynthesis.speak(utterance);
 
@@ -527,6 +556,8 @@
       } catch (e) {}
     }
     revokeAudio();
+    currentClipId = null;
+    audioActive = false;
     speaking = false;
     isPaused = false;
     loadingTts = false;
@@ -554,6 +585,11 @@
         isPaused = false;
         setControls();
       });
+      audioEl.addEventListener("loadedmetadata", function () {
+        if (currentClipId && audioEl && isFinite(audioEl.duration)) {
+          clipStore.setDuration(currentClipId, audioEl.duration);
+        }
+      });
       audioEl.addEventListener("error", function () {
         speaking = false;
         isPaused = false;
@@ -564,11 +600,17 @@
     return audioEl;
   }
 
-  function playBlob(blob) {
+  /** Play a stored clip's MP3 — no network, no credits. */
+  function playClip(clip) {
+    if (!clip || !clip.url) return;
+    stopWebSpeech();
     stopEleven();
     var audio = ensureAudio();
-    audioUrl = URL.createObjectURL(blob);
-    audio.src = audioUrl;
+    // Detached clips (fetched just as Clear all ran) own their URL here.
+    if (clip.detached) audioUrl = clip.url;
+    audio.src = clip.url;
+    currentClipId = clip.detached ? null : clip.id;
+    audioActive = true;
     speaking = true;
     isPaused = false;
     loadingTts = false;
@@ -583,10 +625,6 @@
     }
   }
 
-  function elAudioKey(text, voiceId, rate) {
-    return String(text) + "\n" + String(voiceId) + "\n" + String(rate);
-  }
-
   function currentElRate() {
     var rate = parseFloat(rateEl.value) || 1;
     // Mirror server clamp for ElevenLabs (0.7–1.2)
@@ -595,9 +633,40 @@
     return rate;
   }
 
-  function rememberElBlob(text, voiceId, rate, blob) {
-    lastElBlob = blob;
-    lastElKey = elAudioKey(text, voiceId, rate);
+  function elVoiceName(id) {
+    for (var i = 0; i < elVoices.length; i++) {
+      if (elVoices[i].id === id) return elVoices[i].name || "Voice";
+    }
+    return "Voice";
+  }
+
+  /** Clip metadata for the current ElevenLabs voice + speed + text. */
+  function elClipMeta(text, voiceId, rate, hidden) {
+    return {
+      key: Clips.clipKey("elevenlabs", voiceId, rate, text),
+      source: "elevenlabs",
+      text: text,
+      voiceId: voiceId,
+      voiceName: elVoiceName(voiceId),
+      rate: rate,
+      hidden: !!hidden,
+    };
+  }
+
+  /** Cached clip or one ElevenLabs request; resolves the stored clip. */
+  function getElClip(text, voiceId, rate, hidden) {
+    var meta = elClipMeta(text, voiceId, rate, hidden);
+    return clipStore
+      .getOrFetch(meta, function () {
+        return fetchTts(text, voiceId);
+      })
+      .then(function (r) {
+        return r.clip;
+      });
+  }
+
+  function cachedElClip(text, voiceId, rate) {
+    return clipStore.get(Clips.clipKey("elevenlabs", voiceId, rate, text));
   }
 
   function ttsErrorMessage(err, status) {
@@ -638,7 +707,9 @@
     });
   }
 
-  function playEleven(text) {
+  /** opts.sample: voice-change sample — cached but not listed. */
+  function playEleven(text, opts) {
+    opts = opts || {};
     var voiceId = voiceEl.value;
     if (!voiceId || !text) return;
 
@@ -652,7 +723,7 @@
     }
 
     // Resume paused audio without re-fetch
-    if (isPaused && audioEl && audioEl.src) {
+    if (audioActive && isPaused && audioEl && audioEl.src) {
       var p = audioEl.play();
       if (p && typeof p.catch === "function") {
         p.catch(function () {});
@@ -663,14 +734,25 @@
       return;
     }
 
+    var rate = currentElRate();
+    var meta = elClipMeta(text, voiceId, rate, opts.sample);
+
+    // Same text + voice + speed already voiced this session: replay it.
+    var hit = clipStore.get(meta.key);
+    if (hit) {
+      if (hit.hidden && !opts.sample) clipStore.add(meta);
+      playClip(hit);
+      return;
+    }
+
+    stopWebSpeech();
     stopEleven();
     loadingTts = true;
     setControls();
 
-    fetchTts(text, voiceId)
-      .then(function (blob) {
-        rememberElBlob(text, voiceId, currentElRate(), blob);
-        playBlob(blob);
+    getElClip(text, voiceId, rate, opts.sample)
+      .then(function (clip) {
+        playClip(clip);
       })
       .catch(function (err) {
         loadingTts = false;
@@ -694,7 +776,7 @@
 
   function previewEleven() {
     saveElVoice();
-    playEleven(PREVIEW);
+    playEleven(PREVIEW, { sample: true });
   }
 
   /* ---------- Source switching ---------- */
@@ -1060,8 +1142,8 @@
       }
       filename = sanitizeFilename(filename);
       var rate = currentElRate();
-      var cacheKey = elAudioKey(text, voiceId, rate);
-      var hasCached = !!(lastElBlob && lastElKey === cacheKey);
+      var cachedClip = cachedElClip(text, voiceId, rate);
+      var hasCached = !!(cachedClip && cachedClip.blob);
 
       downloading = true;
       setControls();
@@ -1075,7 +1157,7 @@
         // harmless if Safari ignores it; helps when it works.
         if (hasCached) {
           try {
-            triggerAnchorDownload(lastElBlob, filename);
+            triggerAnchorDownload(cachedClip.blob, filename);
           } catch (e) {}
         }
         downloading = false;
@@ -1086,7 +1168,7 @@
       // Desktop / Android: prefer cached Play blob + <a download>; else form POST.
       if (hasCached) {
         setDownloadStatus("Downloading MP3…", "muted");
-        var result = triggerAnchorDownload(lastElBlob, filename);
+        var result = triggerAnchorDownload(cachedClip.blob, filename);
         downloading = false;
         setControls();
         if (result && result.method === "anchor") {
@@ -1097,14 +1179,23 @@
         return;
       }
 
-      setDownloadStatus("Downloading MP3…", "muted");
-      submitDownloadForm(text, voiceId, rate, filename);
-      downloading = false;
-      setControls();
-      setDownloadStatus(
-        "Downloading MP3… If nothing appears, use Share… → Save to Files",
-        "muted"
-      );
+      // Not voiced yet: make it once, keep it in This session, then save.
+      setDownloadStatus("Generating speech…", "muted");
+      getElClip(text, voiceId, rate, false)
+        .then(function (clip) {
+          triggerAnchorDownload(clip.blob, filename);
+          downloading = false;
+          setControls();
+          setDownloadStatus("Saved · " + filename, "ok");
+        })
+        .catch(function (err) {
+          downloading = false;
+          setControls();
+          setDownloadStatus(
+            (err && err.message) || "Couldn’t generate speech.",
+            "error"
+          );
+        });
     });
   }
 
@@ -1133,16 +1224,15 @@
     downloading = true;
     setControls();
     var rate = currentElRate();
-    var cacheKey = elAudioKey(text, voiceId, rate);
     var ttsPromise;
-    if (lastElBlob && lastElKey === cacheKey) {
-      setDownloadStatus("Using audio from last Play", "muted");
-      ttsPromise = Promise.resolve(lastElBlob);
+    var cachedClip = cachedElClip(text, voiceId, rate);
+    if (cachedClip && cachedClip.blob) {
+      setDownloadStatus("Using the clip from this session", "muted");
+      ttsPromise = Promise.resolve(cachedClip.blob);
     } else {
       setDownloadStatus("Generating speech…", "muted");
-      ttsPromise = fetchTts(text, voiceId).then(function (blob) {
-        rememberElBlob(text, voiceId, rate, blob);
-        return blob;
+      ttsPromise = getElClip(text, voiceId, rate, false).then(function (clip) {
+        return clip.blob;
       });
     }
 
@@ -1200,7 +1290,196 @@
     });
   }
 
-  /* ---------- Shared controls ---------- */
+  /* ---------- This session (clip list) ---------- */
+
+  var shareFilesSupport = null;
+  function canShareFiles() {
+    if (shareFilesSupport !== null) return shareFilesSupport;
+    shareFilesSupport = false;
+    try {
+      if (typeof File !== "undefined" && navigator.share && navigator.canShare) {
+        var probe = new File([new Uint8Array(4)], "readit.mp3", { type: "audio/mpeg" });
+        shareFilesSupport = !!navigator.canShare({ files: [probe] });
+      }
+    } catch (e) {}
+    return shareFilesSupport;
+  }
+
+  function clipPlayLabel(clip) {
+    if (!clip.exportable) {
+      return speakingClipId === clip.id ? "Stop" : "Play";
+    }
+    if (currentClipId === clip.id) {
+      if (speaking) return "Pause";
+      if (isPaused) return "Resume";
+    }
+    return "Play";
+  }
+
+  function clipMetaText(clip) {
+    var parts = [clip.voiceName];
+    if (clip.exportable) {
+      var d = Clips.formatDuration(clip.duration);
+      if (d) parts.push(d);
+    } else {
+      parts.push("Device voice");
+    }
+    parts.push(clip.rate.toFixed(2).replace(/0$/, "") + "×");
+    return parts.join(" · ");
+  }
+
+  function makeBtn(label, cls, action, id) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn " + cls;
+    b.textContent = label;
+    b.setAttribute("data-action", action);
+    b.setAttribute("data-id", id);
+    return b;
+  }
+
+  function renderClips() {
+    if (!clipsList || !clipsSection) return;
+    var list = clipStore.list();
+    clipsSection.hidden = list.length === 0;
+    clipsList.innerHTML = "";
+    list.forEach(function (clip) {
+      var li = document.createElement("li");
+      li.className = "clip" + (clip.exportable ? "" : " clip-device");
+      li.setAttribute("data-id", clip.id);
+
+      var txt = document.createElement("p");
+      txt.className = "clip-text";
+      txt.textContent = "“" + Clips.previewText(clip.text, 90) + "”";
+      li.appendChild(txt);
+
+      var meta = document.createElement("p");
+      meta.className = "clip-meta";
+      meta.textContent = clipMetaText(clip);
+      li.appendChild(meta);
+
+      var actions = document.createElement("div");
+      actions.className = "clip-actions";
+      var playB = makeBtn(clipPlayLabel(clip), "btn-primary clip-play", "play", clip.id);
+      playB.setAttribute("aria-label", clipPlayLabel(clip) + " clip " + clip.n);
+      actions.appendChild(playB);
+      if (clip.exportable) {
+        if (canShareFiles()) {
+          actions.appendChild(makeBtn("Share", "btn-secondary clip-share", "share", clip.id));
+        }
+        actions.appendChild(makeBtn("Download", "btn-secondary clip-download", "download", clip.id));
+      } else {
+        var note = document.createElement("span");
+        note.className = "clip-noexport";
+        note.textContent = "No MP3 — export is ElevenLabs only";
+        actions.appendChild(note);
+      }
+      li.appendChild(actions);
+      clipsList.appendChild(li);
+    });
+  }
+
+  /** Update only Play/Pause labels (cheap; runs on every control change). */
+  function renderClipStates() {
+    if (!clipsList) return;
+    var btns = clipsList.querySelectorAll("button[data-action='play']");
+    for (var i = 0; i < btns.length; i++) {
+      var clip = clipStore.getById(btns[i].getAttribute("data-id"));
+      if (!clip) continue;
+      var label = clipPlayLabel(clip);
+      if (btns[i].textContent !== label) {
+        btns[i].textContent = label;
+        btns[i].setAttribute("aria-label", label + " clip " + clip.n);
+      }
+      var li = btns[i].closest ? btns[i].closest(".clip") : null;
+      if (li) {
+        var on = currentClipId === clip.id || speakingClipId === clip.id;
+        li.classList.toggle("is-playing", on);
+      }
+    }
+  }
+
+  function toggleClip(clip) {
+    if (!clip.exportable) {
+      // Device voice: re-speak for free (no MP3 exists to replay).
+      if (speakingClipId === clip.id) {
+        stopWebSpeech();
+        return;
+      }
+      if (!speechAvailable()) return;
+      var v = findDeviceVoice(clip.voiceId);
+      speakWebSpeech(clip.text, true, { voice: v, rate: clip.rate, clipId: clip.id });
+      return;
+    }
+    if (currentClipId === clip.id && speaking) {
+      pauseEleven();
+      return;
+    }
+    if (currentClipId === clip.id && isPaused && audioEl && audioEl.src) {
+      var p = audioEl.play();
+      if (p && typeof p.catch === "function") p.catch(function () {});
+      speaking = true;
+      isPaused = false;
+      setControls();
+      return;
+    }
+    playClip(clip);
+  }
+
+  function exportClip(clip, how) {
+    if (!clip || !clip.blob) return;
+    var filename = Clips.clipFilename(clip);
+    if (how === "share") {
+      // Blob is already in memory, so share() runs inside this tap.
+      triggerWebShare(clip.blob, filename).then(function (result) {
+        if (result.method === "share") {
+          setDownloadStatus("Shared · " + filename, "ok");
+        } else if (result.method === "cancelled") {
+          setDownloadStatus("Cancelled", "muted");
+        } else {
+          triggerAnchorDownload(clip.blob, filename);
+          setDownloadStatus("Saved · " + filename, "ok");
+        }
+      });
+      return;
+    }
+    triggerAnchorDownload(clip.blob, filename);
+    setDownloadStatus("Saved · " + filename + " (check Downloads)", "ok");
+  }
+
+  function wireClips() {
+    if (clipsList) {
+      clipsList.addEventListener("click", function (ev) {
+        var t = ev.target;
+        var btn = t && t.closest ? t.closest("button[data-action]") : null;
+        if (!btn) return;
+        var clip = clipStore.getById(btn.getAttribute("data-id"));
+        if (!clip) return;
+        var action = btn.getAttribute("data-action");
+        if (action === "play") toggleClip(clip);
+        else if (action === "share" || action === "download") exportClip(clip, action);
+      });
+    }
+    if (clipsClearBtn) {
+      clipsClearBtn.addEventListener("click", function () {
+        if (!clipStore.list().length) return;
+        if (!window.confirm("Clear all clips from this session? You can’t get them back without voicing again.")) {
+          return;
+        }
+        stopAll();
+        clipStore.revokeAll();
+      });
+    }
+    // Session-only: when the page really goes away, drop every MP3 + URL.
+    // (persisted = kept in back/forward cache; the page may come back intact.)
+    window.addEventListener("pagehide", function (ev) {
+      if (ev && ev.persisted) return;
+      stopAll();
+      clipStore.revokeAll();
+    });
+    renderClips();
+  }
+
   /* ---------- Shared controls ---------- */
 
   function saveRate() {
@@ -1224,11 +1503,15 @@
 
   function play() {
     var text = textEl.value.trim();
+    if (audioActive && isPaused && audioEl && audioEl.src) {
+      var p = audioEl.play();
+      if (p && typeof p.catch === "function") p.catch(function () {});
+      speaking = true;
+      isPaused = false;
+      setControls();
+      return;
+    }
     if (mode === "elevenlabs") {
-      if (isPaused && audioEl && audioEl.src) {
-        playEleven(text);
-        return;
-      }
       if (!text) return;
       playEleven(text);
       return;
@@ -1242,11 +1525,29 @@
       setControls();
       return;
     }
-    speakWebSpeech(text, true);
+    var dc = rememberDeviceClip(text);
+    speakWebSpeech(text, true, dc ? { clipId: dc.id } : null);
+  }
+
+  /** Device prompts go in the list too: replay = re-speak (free), no export. */
+  function rememberDeviceClip(text) {
+    var v = selectedWebSpeechVoice();
+    if (!v || !text) return null;
+    var rate = parseFloat(rateEl.value) || 1;
+    var key = Clips.clipKey("device", voiceKey(v), rate, text);
+    var clip = clipStore.add({
+      key: key,
+      source: "device",
+      text: text,
+      voiceId: voiceKey(v),
+      voiceName: v.name || "Device voice",
+      rate: rate,
+    });
+    return clip;
   }
 
   function pause() {
-    if (mode === "elevenlabs") {
+    if (audioActive || mode === "elevenlabs") {
       pauseEleven();
       return;
     }
@@ -1258,11 +1559,7 @@
   }
 
   function stopSpeaking() {
-    if (mode === "elevenlabs") {
-      stopEleven();
-      return;
-    }
-    stopWebSpeech();
+    stopAll();
   }
 
   function previewVoice() {
@@ -1367,6 +1664,7 @@
       }
     });
 
+    wireClips();
     updateCounts();
     setControls();
   }

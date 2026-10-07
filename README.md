@@ -16,6 +16,17 @@ Built for Capstiller.
    - **Share…** — opens the system share sheet (AirDrop, Drive, etc.). **Share → Save to Files** also stores a **raw MP3 in Apple Files** — that is a local file you can upload into another app.
    - If you already tapped **Play**, Share can reuse that MP3 when text/voice/speed match (no second generation). Device / Web Speech voices can’t export a clean file, so Download / Share stay disabled there.
 
+### This session (replay + export without new credits)
+
+Every prompt you voice is kept as a clip under **This session**:
+
+- **ElevenLabs** clips are the MP3 the server returned, held in memory as a Blob. **Play/Pause** replays it — no new API call, no credits. Playing the same text + voice + speed again (main Play, Download or Share) reuses the stored clip too.
+- **Share** (shown when the browser can share files, e.g. Android Chrome) opens the share sheet with `readit-<voice>-<n>.mp3`; **Download** saves the same file via `<a download>`.
+- **Device** voices can't produce an MP3 in the browser. Their clips replay by re-speaking (free) and show "No MP3 — export is ElevenLabs only".
+- Session-only: nothing goes to localStorage / IndexedDB / a server. Object URLs are revoked on `pagehide` (and by **Clear all**). Close the app and the clips are gone. Voice-change samples are cached (so re-picking a voice is free) but not listed.
+
+Clip cache logic lives in `clips.js`; tests: `node --test tests/`.
+
 We do **not** mic-record the speaker on Play. ElevenLabs already returns an MP3 blob for playback; caching that for Share is higher quality and needs no mic permission. A speaker-mic hack would be noisier and still wouldn’t help Device voices.
 
 Your last voice and speed are remembered in `localStorage`.
@@ -67,7 +78,7 @@ To exercise `/api/*` locally, use `vercel dev` with the env var set.
 
 ## Stack
 
-- Static: `index.html` / `styles.css` / `app.js`
+- Static: `index.html` / `styles.css` / `app.js` / `clips.js` (session clip store)
 - Serverless: `api/voices.js`, `api/tts.js`, `api/download.js` (Node, `fetch` to ElevenLabs — no npm deps)
 - `vercel.json` for clean URLs + basic headers
 
