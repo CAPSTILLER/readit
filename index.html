@@ -55,13 +55,19 @@
         <label for="voice">Voice</label>
         <div class="voice-source" role="group" aria-label="Voice source">
           <button type="button" id="source-elevenlabs" class="btn btn-source btn-source-primary" aria-pressed="false">
-            ElevenLabs voices
+            ElevenLabs
+            <span class="btn-source-sub">premium</span>
+          </button>
+          <button type="button" id="source-google" class="btn btn-source btn-source-primary" aria-pressed="false">
+            Google
+            <span class="btn-source-sub">cheap · long reads</span>
           </button>
           <button type="button" id="source-device" class="btn btn-source btn-source-secondary" aria-pressed="false">
-            Device voices
+            Device voices · free
           </button>
         </div>
         <p id="source-note" class="source-note" hidden></p>
+        <p id="google-note" class="source-note google-note" hidden>Google: about 1M HD + 4M standard characters free each month.</p>
         <select id="voice" class="select" disabled>
           <option value="">Loading voices…</option>
         </select>
@@ -100,10 +106,10 @@
       </div>
 
       <div class="export-controls" role="group" aria-label="Export MP3">
-        <button type="button" id="download" class="btn btn-primary btn-download" disabled title="Download needs ElevenLabs">
+        <button type="button" id="download" class="btn btn-primary btn-download" disabled title="Download needs ElevenLabs or Google">
           Download MP3
         </button>
-        <button type="button" id="share" class="btn btn-secondary btn-share" disabled title="Share needs ElevenLabs">
+        <button type="button" id="share" class="btn btn-secondary btn-share" disabled title="Share needs ElevenLabs or Google">
           Share…
         </button>
       </div>
@@ -148,14 +154,15 @@
     </dialog>
 
     <p class="hint" id="voice-hint">
-      Pick a source above, then a voice from that list. ElevenLabs is natural cloud speech; Device uses voices on this phone or computer.
+      Pick a source above, then a voice from that list. ElevenLabs is premium cloud speech; Google is the cheap cloud option for long reads; Device uses voices on this phone or computer.
     </p>
 
     <footer class="footer">
-      <p>Two sources: ElevenLabs (cloud) or Device (Web Speech). Only one list at a time — less clutter.</p>
+      <p>Three sources: ElevenLabs or Google (cloud MP3) or Device (Web Speech). Only one list at a time — less clutter.</p>
     </footer>
   </div>
   <script src="clips.js"></script>
+  <script src="tts-chunks.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

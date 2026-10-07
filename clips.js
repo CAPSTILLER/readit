@@ -2,7 +2,7 @@
  * Readit session clips — in-memory only.
  *
  * Every voiced prompt is kept here for this tab's lifetime so it can be
- * replayed and exported without a new ElevenLabs request. Nothing is written
+ * replayed and exported without a new ElevenLabs / Google request. Nothing is written
  * to localStorage / IndexedDB / the server. Call revokeAll() on pagehide.
  *
  * Works in the browser (window.ReaditClips) and in Node (module.exports) so
@@ -20,6 +20,8 @@
 
   /** ElevenLabs mp3_44100_128 is CBR 128 kbps = 16,000 bytes per second. */
   var MP3_BYTES_PER_SEC = 16000;
+  /** Google Cloud TTS MP3 is 32 kbps = 4,000 bytes per second. */
+  var BYTES_PER_SEC_BY_SOURCE = { elevenlabs: 16000, google: 4000 };
 
   function normRate(rate) {
     var r = parseFloat(rate);
@@ -60,9 +62,10 @@
     return t.slice(0, max - 1).replace(/\s+\S*$/, "") + "…";
   }
 
-  function estimateDuration(bytes) {
+  /** Rough length until the <audio> element reports the real duration. */
+  function estimateDuration(bytes, source) {
     if (!bytes || bytes <= 0) return 0;
-    return bytes / MP3_BYTES_PER_SEC;
+    return bytes / (BYTES_PER_SEC_BY_SOURCE[source] || MP3_BYTES_PER_SEC);
   }
 
   function formatDuration(sec) {
@@ -117,7 +120,7 @@
 
     /**
      * Store a clip. meta: { key, text, voiceId, voiceName, rate, source,
-     * blob?, hidden? }. Blob clips (ElevenLabs) get an object URL; device
+     * blob?, hidden? }. Blob clips (ElevenLabs, Google) get an object URL; device
      * clips have no blob (replay = re-speak, no export).
      */
     function add(meta) {
@@ -148,7 +151,7 @@
         blob: blob,
         url: blob ? createUrl(blob) : null,
         bytes: blob ? blob.size || 0 : 0,
-        duration: blob ? estimateDuration(blob.size || 0) : 0,
+        duration: blob ? estimateDuration(blob.size || 0, meta.source || "elevenlabs") : 0,
         exportable: !!blob,
         createdAt: Date.now(),
       };
@@ -191,7 +194,7 @@
               id: "x" + ++idSeq,
               key: meta.key,
               n: 0,
-              source: "elevenlabs",
+              source: meta.source || "elevenlabs",
               text: String(meta.text || ""),
               voiceId: meta.voiceId || "",
               voiceName: meta.voiceName || "Voice",
@@ -200,7 +203,7 @@
               blob: blob,
               url: createUrl(blob),
               bytes: blob.size || 0,
-              duration: estimateDuration(blob.size || 0),
+              duration: estimateDuration(blob.size || 0, meta.source || "elevenlabs"),
               exportable: true,
               detached: true,
             };

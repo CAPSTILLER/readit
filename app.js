@@ -3,11 +3,19 @@
 
   var STORAGE_KEY = "readit-voice-uri";
   var EL_STORAGE_KEY = "readit-el-voice-id";
+  var GOOGLE_STORAGE_KEY = "readit-google-voice";
   var SOURCE_KEY = "readit-voice-source";
   var RATE_KEY = "readit-rate";
   var PREVIEW =
     "Hey Cap. This is how I sound with the voice you picked.";
-  var MAX_TTS_CHARS = 5000;
+  var MAX_TTS_CHARS = 5000; // ElevenLabs, per request
+  var MAX_GOOGLE_CHARS = 20000; // Google, app-level max
+  /** Google text above this is sent as a few requests (each MP3 stays under Vercel's 4.5 MB). */
+  var GOOGLE_PART_BYTES = 9000;
+  /** Server cap per /api/google-tts or /api/download request. */
+  var GOOGLE_REQUEST_CHARS = 10000;
+  var GOOGLE_FREE_NOTE = "Google: about 1M HD + 4M standard characters free each month.";
+  var GOOGLE_SETUP_NOTE = "Google voices need setup";
 
   var textEl = document.getElementById("text");
   var voiceEl = document.getElementById("voice");
@@ -23,6 +31,8 @@
   var footerEl = document.querySelector(".footer p");
   var sourceElBtn = document.getElementById("source-elevenlabs");
   var sourceDeviceBtn = document.getElementById("source-device");
+  var sourceGoogleBtn = document.getElementById("source-google");
+  var googleNoteEl = document.getElementById("google-note");
   var sourceNoteEl = document.getElementById("source-note");
   var downloadBtn = document.getElementById("download");
   var downloadStatusEl = document.getElementById("download-status");
@@ -34,7 +44,7 @@
   var downloadHintEl = document.getElementById("download-hint");
   var shareBtn = document.getElementById("share");
 
-  /** "elevenlabs" | "webspeech" */
+  /** "elevenlabs" | "google" | "webspeech" */
   var mode = "webspeech";
   var voices = [];
   var voicesFingerprint = "";
@@ -58,9 +68,44 @@
   var clipsClearBtn = document.getElementById("clips-clear");
   var audioEl = null;
   var audioUrl = null;
-  var elVoices = [];
-  var elevenLabsAvailable = false;
-  var elUnavailableReason = "";
+  var Chunks = window.ReaditChunks;
+  /** Cloud voice sources (MP3 from our serverless routes). Device = Web Speech. */
+  var providers = {
+    elevenlabs: {
+      id: "elevenlabs",
+      label: "ElevenLabs",
+      voicesUrl: "/api/voices",
+      ttsUrl: "/api/tts",
+      storageKey: EL_STORAGE_KEY,
+      minRate: 0.7,
+      maxRate: 1.2,
+      maxChars: MAX_TTS_CHARS,
+      voices: [],
+      available: false,
+      reason: "",
+    },
+    google: {
+      id: "google",
+      label: "Google",
+      voicesUrl: "/api/google-voices",
+      ttsUrl: "/api/google-tts",
+      storageKey: GOOGLE_STORAGE_KEY,
+      minRate: 0.25,
+      maxRate: 2,
+      maxChars: MAX_GOOGLE_CHARS,
+      voices: [],
+      available: false,
+      reason: "",
+    },
+  };
+
+  function cloudProvider(source) {
+    return providers[source || mode] || null;
+  }
+
+  function isCloudMode() {
+    return !!providers[mode];
+  }
   var deviceVoicesWired = false;
 
   function speechAvailable() {
@@ -112,15 +157,15 @@
 
   function setControls() {
     var hasText = textEl.value.trim().length > 0;
-    var hasVoices =
-      mode === "elevenlabs" ? elVoices.length > 0 : voices.length > 0;
-    var hasElVoice = mode === "elevenlabs" && !!voiceEl.value && elVoices.length > 0;
+    var prov = cloudProvider();
+    var hasVoices = prov ? prov.voices.length > 0 : voices.length > 0;
+    var hasElVoice = !!prov && !!voiceEl.value && prov.voices.length > 0;
     var canResumeEl = audioActive && isPaused && audioEl && audioEl.src;
     var canPlay =
       !loadingTts &&
       hasVoices &&
       (canResumeEl ||
-        (hasText && (mode === "elevenlabs" || speechAvailable())));
+        (hasText && (!!prov || speechAvailable())));
     playBtn.disabled = !canPlay;
     renderClipStates();
     pauseBtn.disabled = !speaking || loadingTts;
@@ -132,19 +177,19 @@
       playBtn.textContent = isPaused ? "Resume" : "Play";
     }
     var canExport =
-      mode === "elevenlabs" &&
-      elevenLabsAvailable &&
+      !!prov &&
+      prov.available &&
       hasText &&
       hasElVoice &&
       !downloading;
     if (downloadBtn) {
       downloadBtn.disabled = !canExport;
-      if (mode !== "elevenlabs") {
-        downloadBtn.title = "Download needs ElevenLabs (device voices can’t export a clean file)";
+      if (!prov) {
+        downloadBtn.title = "Download needs ElevenLabs or Google (device voices can’t export a clean file)";
       } else if (!hasText) {
         downloadBtn.title = "Add text to download";
       } else if (!hasElVoice) {
-        downloadBtn.title = "Pick an ElevenLabs voice";
+        downloadBtn.title = "Pick a voice";
       } else if (downloading) {
         downloadBtn.title = "Downloading…";
       } else {
@@ -157,12 +202,12 @@
     }
     if (shareBtn) {
       shareBtn.disabled = !canExport;
-      if (mode !== "elevenlabs") {
-        shareBtn.title = "Share needs ElevenLabs";
+      if (!prov) {
+        shareBtn.title = "Share needs ElevenLabs or Google";
       } else if (!hasText) {
         shareBtn.title = "Add text to share";
       } else if (!hasElVoice) {
-        shareBtn.title = "Pick an ElevenLabs voice";
+        shareBtn.title = "Pick a voice";
       } else if (downloading) {
         shareBtn.title = "Busy…";
       } else {
@@ -172,13 +217,13 @@
     }
     if (downloadHintEl) {
       var showHint =
-        mode === "elevenlabs" && elevenLabsAvailable && !downloading;
+        !!prov && prov.available && !downloading;
       downloadHintEl.hidden = !showHint;
     }
   }
 
   function saveSource() {
-    var value = mode === "elevenlabs" ? "elevenlabs" : "device";
+    var value = isCloudMode() ? mode : "device";
     try {
       localStorage.setItem(SOURCE_KEY, value);
     } catch (e) {}
@@ -187,34 +232,45 @@
   function loadSavedSource() {
     try {
       var s = localStorage.getItem(SOURCE_KEY);
-      if (s === "elevenlabs" || s === "device") return s;
+      if (s === "elevenlabs" || s === "google" || s === "device") return s;
     } catch (e) {}
     return null;
   }
 
   function updateSourceButtons() {
-    var elActive = mode === "elevenlabs";
-    if (sourceElBtn) {
-      sourceElBtn.setAttribute("aria-pressed", elActive ? "true" : "false");
-      sourceElBtn.disabled = !elevenLabsAvailable;
-      if (!elevenLabsAvailable) {
-        sourceElBtn.title = elUnavailableReason || "ElevenLabs unavailable";
+    [
+      [sourceElBtn, providers.elevenlabs],
+      [sourceGoogleBtn, providers.google],
+    ].forEach(function (pair) {
+      var btn = pair[0];
+      var prov = pair[1];
+      if (!btn) return;
+      btn.setAttribute("aria-pressed", mode === prov.id ? "true" : "false");
+      btn.disabled = !prov.available;
+      if (!prov.available) {
+        btn.title = prov.reason || prov.label + " unavailable";
       } else {
-        sourceElBtn.removeAttribute("title");
+        btn.removeAttribute("title");
       }
-    }
+    });
     if (sourceDeviceBtn) {
-      sourceDeviceBtn.setAttribute("aria-pressed", elActive ? "false" : "true");
+      sourceDeviceBtn.setAttribute("aria-pressed", isCloudMode() ? "false" : "true");
       sourceDeviceBtn.disabled = false;
     }
     if (sourceNoteEl) {
-      if (!elevenLabsAvailable && elUnavailableReason) {
-        sourceNoteEl.hidden = false;
-        sourceNoteEl.textContent = elUnavailableReason;
-      } else {
-        sourceNoteEl.hidden = true;
-        sourceNoteEl.textContent = "";
+      var notes = [];
+      if (!providers.elevenlabs.available && providers.elevenlabs.reason) {
+        notes.push(providers.elevenlabs.reason);
       }
+      if (!providers.google.available && providers.google.reason) {
+        notes.push(providers.google.reason);
+      }
+      sourceNoteEl.hidden = notes.length === 0;
+      sourceNoteEl.textContent = notes.join(" · ");
+    }
+    if (googleNoteEl) {
+      googleNoteEl.hidden = mode !== "google";
+      googleNoteEl.textContent = GOOGLE_FREE_NOTE;
     }
   }
 
@@ -222,20 +278,31 @@
     if (mode === "elevenlabs") {
       if (hintEl) {
         hintEl.textContent =
-          "ElevenLabs selected — natural cloud voices. Every clip you play is kept under This session, so you can replay or export it without using more credits. Changing voice plays a short sample.";
+          "ElevenLabs selected — natural cloud voices, but about 1 credit per character, so save it for short pieces. Every clip you play is kept under This session, so you can replay or export it without using more credits. Changing voice plays a short sample.";
       }
       if (footerEl) {
         footerEl.textContent =
-          "Source: ElevenLabs (cloud). Tap Device voices for the smaller on-device list.";
+          "Source: ElevenLabs (cloud). Google is the cheap option for long reads; Device is free.";
+      }
+    } else if (mode === "google") {
+      if (hintEl) {
+        hintEl.textContent =
+          "Google selected — HD voices sound most natural; WaveNet voices have the bigger free allowance. Up to " +
+          MAX_GOOGLE_CHARS.toLocaleString("en-US") +
+          " characters per read. Every clip is kept under This session to replay or export without a new request. Changing voice plays a short sample.";
+      }
+      if (footerEl) {
+        footerEl.textContent =
+          "Source: Google Cloud Text-to-Speech. " + GOOGLE_FREE_NOTE;
       }
     } else {
       if (hintEl) {
         hintEl.textContent =
-          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Device clips replay for free under This session, but MP3 export is ElevenLabs only (device voices can’t make a file).";
+          "Device voices selected — only voices on this phone or computer. Prefer ones tagged “clearer.” Device clips replay for free under This session, but MP3 export needs ElevenLabs or Google (device voices can’t make a file).";
       }
       if (footerEl) {
         footerEl.textContent =
-          "Source: Device (Web Speech). Tap ElevenLabs voices for cloud speech when the server is ready.";
+          "Source: Device (Web Speech). Tap ElevenLabs or Google for cloud voices you can export as MP3.";
       }
     }
   }
@@ -484,7 +551,7 @@
     }
   }
 
-  /* ---------- ElevenLabs helpers ---------- */
+  /* ---------- Cloud voice helpers (ElevenLabs + Google) ---------- */
 
   function elLabel(v) {
     var parts = [v.name || "Voice"];
@@ -496,14 +563,22 @@
     return parts.join(" ");
   }
 
-  function populateElevenVoices(list) {
-    if (list) elVoices = list;
+  var GOOGLE_TIER_GROUPS = {
+    hd: "HD voices · 1M free chars/mo",
+    wavenet: "WaveNet · 4M free chars/mo",
+  };
+
+  /** Fill the voice list for the current cloud source (ElevenLabs or Google). */
+  function populateCloudVoices() {
+    var prov = cloudProvider();
+    if (!prov) return;
+    var list = prov.voices;
     voiceEl.innerHTML = "";
 
-    if (!elVoices.length) {
+    if (!list.length) {
       var empty = document.createElement("option");
       empty.value = "";
-      empty.textContent = "No ElevenLabs voices";
+      empty.textContent = "No " + prov.label + " voices";
       voiceEl.appendChild(empty);
       voiceEl.disabled = true;
       setControls();
@@ -512,29 +587,40 @@
 
     var saved = null;
     try {
-      saved = localStorage.getItem(EL_STORAGE_KEY);
+      saved = localStorage.getItem(prov.storageKey);
     } catch (e) {}
 
     var pick = null;
-    elVoices.forEach(function (v) {
+    var groups = {};
+    list.forEach(function (v) {
       var o = document.createElement("option");
       o.value = v.id;
-      o.textContent = elLabel(v);
-      voiceEl.appendChild(o);
+      o.textContent = prov.id === "google" ? v.label || v.name : elLabel(v);
+      if (prov.id === "google" && GOOGLE_TIER_GROUPS[v.tier]) {
+        if (!groups[v.tier]) {
+          groups[v.tier] = document.createElement("optgroup");
+          groups[v.tier].label = GOOGLE_TIER_GROUPS[v.tier];
+          voiceEl.appendChild(groups[v.tier]);
+        }
+        groups[v.tier].appendChild(o);
+      } else {
+        voiceEl.appendChild(o);
+      }
       if (saved && v.id === saved) pick = v.id;
     });
 
-    if (!pick) pick = elVoices[0].id;
+    if (!pick) pick = list[0].id;
     voiceEl.value = pick;
     voiceEl.disabled = false;
     setControls();
   }
 
-  function saveElVoice() {
+  function saveCloudVoice() {
+    var prov = cloudProvider();
     var id = voiceEl.value;
-    if (!id) return;
+    if (!prov || !id) return;
     try {
-      localStorage.setItem(EL_STORAGE_KEY, id);
+      localStorage.setItem(prov.storageKey, id);
     } catch (e) {}
   }
 
@@ -625,40 +711,44 @@
     }
   }
 
+  /** Slider speed clamped to what the current cloud source accepts (mirrors the server). */
   function currentElRate() {
+    var prov = cloudProvider() || providers.elevenlabs;
     var rate = parseFloat(rateEl.value) || 1;
-    // Mirror server clamp for ElevenLabs (0.7–1.2)
-    if (rate > 1.2) rate = 1.2;
-    if (rate < 0.7) rate = 0.7;
+    if (rate > prov.maxRate) rate = prov.maxRate;
+    if (rate < prov.minRate) rate = prov.minRate;
     return rate;
   }
 
-  function elVoiceName(id) {
-    for (var i = 0; i < elVoices.length; i++) {
-      if (elVoices[i].id === id) return elVoices[i].name || "Voice";
+  function elVoiceName(id, source) {
+    var prov = cloudProvider(source);
+    var list = prov ? prov.voices : [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i].name || "Voice";
     }
     return "Voice";
   }
 
-  /** Clip metadata for the current ElevenLabs voice + speed + text. */
+  /** Clip metadata for the current cloud source + voice + speed + text. */
   function elClipMeta(text, voiceId, rate, hidden) {
+    var source = isCloudMode() ? mode : "elevenlabs";
     return {
-      key: Clips.clipKey("elevenlabs", voiceId, rate, text),
-      source: "elevenlabs",
+      key: Clips.clipKey(source, voiceId, rate, text),
+      source: source,
       text: text,
       voiceId: voiceId,
-      voiceName: elVoiceName(voiceId),
+      voiceName: elVoiceName(voiceId, source),
       rate: rate,
       hidden: !!hidden,
     };
   }
 
-  /** Cached clip or one ElevenLabs request; resolves the stored clip. */
+  /** Cached clip or one cloud request; resolves the stored clip. */
   function getElClip(text, voiceId, rate, hidden) {
     var meta = elClipMeta(text, voiceId, rate, hidden);
     return clipStore
       .getOrFetch(meta, function () {
-        return fetchTts(text, voiceId);
+        return fetchTts(text, voiceId, meta.source, rate);
       })
       .then(function (r) {
         return r.clip;
@@ -666,7 +756,25 @@
   }
 
   function cachedElClip(text, voiceId, rate) {
-    return clipStore.get(Clips.clipKey("elevenlabs", voiceId, rate, text));
+    var source = isCloudMode() ? mode : "elevenlabs";
+    return clipStore.get(Clips.clipKey(source, voiceId, rate, text));
+  }
+
+  function maxCharsForMode() {
+    var prov = cloudProvider();
+    return prov ? prov.maxChars : MAX_TTS_CHARS;
+  }
+
+  function tooLongMessage() {
+    var prov = cloudProvider() || providers.elevenlabs;
+    return (
+      "Text is too long for " +
+      prov.label +
+      " (max " +
+      prov.maxChars.toLocaleString("en-US") +
+      " characters). Shorten it a bit" +
+      (prov.id === "elevenlabs" ? " or use Google for long reads." : ".")
+    );
   }
 
   function ttsErrorMessage(err, status) {
@@ -699,9 +807,24 @@
     return "TTS failed" + (status ? " (" + status + ")" : "");
   }
 
-  function fetchTts(text, voiceId) {
-    var rate = currentElRate();
-    return fetch("/api/tts", {
+  /** Plain words for a Google failure; the server already maps Google's reasons. */
+  function googleErrorMessage(err, status) {
+    if (status === 503) {
+      return GOOGLE_SETUP_NOTE + " (add GOOGLE_TTS_API_KEY in Vercel).";
+    }
+    if (err && err.error) {
+      if (err.reason && err.reason !== "google_error" && err.reason !== "network") {
+        return err.error;
+      }
+      var d = String(err.detail || "").replace(/\s+/g, " ").trim().slice(0, 160);
+      return err.error + (status ? " (" + status + ")" : "") + (d ? ": " + d : "");
+    }
+    return "Google TTS failed" + (status ? " (" + status + ")" : "");
+  }
+
+  function postTts(source, text, voiceId, rate) {
+    var prov = providers[source] || providers.elevenlabs;
+    return fetch(prov.ttsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
       body: JSON.stringify({ text: text, voiceId: voiceId, rate: rate }),
@@ -713,7 +836,9 @@
             return { error: "TTS failed (" + res.status + ")" };
           })
           .then(function (err) {
-            throw new Error(ttsErrorMessage(err, res.status));
+            throw new Error(
+              source === "google" ? googleErrorMessage(err, res.status) : ttsErrorMessage(err, res.status)
+            );
           });
       }
       return res.blob().then(function (blob) {
@@ -725,18 +850,39 @@
     });
   }
 
+  /**
+   * One cloud MP3 for the whole text. Long Google text goes out as a few
+   * requests (sentence boundaries) and the MP3s are joined in order.
+   */
+  function fetchTts(text, voiceId, source, rate) {
+    source = source || "elevenlabs";
+    if (rate == null) rate = currentElRate();
+    if (source !== "google" || !Chunks || Chunks.utf8Bytes(text) <= GOOGLE_PART_BYTES) {
+      return postTts(source, text, voiceId, rate);
+    }
+    var parts = Chunks.splitText(text, GOOGLE_PART_BYTES);
+    var blobs = [];
+    return parts
+      .reduce(function (p, part) {
+        return p.then(function () {
+          return postTts(source, part, voiceId, rate).then(function (b) {
+            blobs.push(b);
+          });
+        });
+      }, Promise.resolve())
+      .then(function () {
+        return new Blob(blobs, { type: "audio/mpeg" });
+      });
+  }
+
   /** opts.sample: voice-change sample — cached but not listed. */
   function playEleven(text, opts) {
     opts = opts || {};
     var voiceId = voiceEl.value;
     if (!voiceId || !text) return;
 
-    if (text.length > MAX_TTS_CHARS) {
-      window.alert(
-        "Text is too long for ElevenLabs (max " +
-          MAX_TTS_CHARS +
-          " characters). Shorten it a bit."
-      );
+    if (text.length > maxCharsForMode()) {
+      window.alert(tooLongMessage());
       return;
     }
 
@@ -793,7 +939,7 @@
   }
 
   function previewEleven() {
-    saveElVoice();
+    saveCloudVoice();
     playEleven(PREVIEW, { sample: true });
   }
 
@@ -807,10 +953,10 @@
   function applySource(source, persist) {
     stopAll();
 
-    if (source === "elevenlabs" && elevenLabsAvailable) {
-      mode = "elevenlabs";
+    if (providers[source] && providers[source].available) {
+      mode = source;
       unsupportedEl.hidden = true;
-      populateElevenVoices();
+      populateCloudVoices();
     } else {
       mode = "webspeech";
       if (!speechAvailable()) {
@@ -835,13 +981,15 @@
 
   function pickInitialSource() {
     var saved = loadSavedSource();
-    if (saved === "elevenlabs" && elevenLabsAvailable) return "elevenlabs";
+    if (saved && providers[saved] && providers[saved].available) return saved;
     if (saved === "device") return "device";
-    if (elevenLabsAvailable) return "elevenlabs";
+    // Nothing saved (or that source is down): cheap Google first, then ElevenLabs.
+    if (providers.google.available) return "google";
+    if (providers.elevenlabs.available) return "elevenlabs";
     return "device";
   }
 
-  /* ---------- Download (ElevenLabs MP3) ---------- */
+  /* ---------- Download (cloud MP3: ElevenLabs or Google) ---------- */
 
   function setDownloadStatus(msg, kind) {
     if (!downloadStatusEl) return;
@@ -986,7 +1134,7 @@
    * Hidden form POST to /api/download so Safari navigates to an attachment
    * response (Content-Disposition) — more reliable than <a download> on iOS.
    */
-  function submitDownloadForm(text, voiceId, rate, filename) {
+  function submitDownloadForm(text, voiceId, rate, filename, source) {
     var form = document.createElement("form");
     form.method = "POST";
     form.action = "/api/download";
@@ -1008,6 +1156,7 @@
     addField("voiceId", voiceId);
     addField("rate", rate);
     addField("filename", filename);
+    if (source && source !== "elevenlabs") addField("source", source);
 
     document.body.appendChild(form);
     try {
@@ -1134,8 +1283,8 @@
 
   function downloadAudio() {
     if (downloading) return;
-    if (mode !== "elevenlabs" || !elevenLabsAvailable) {
-      setDownloadStatus("Download needs ElevenLabs — switch source above.", "muted");
+    if (!isCloudMode() || !cloudProvider().available) {
+      setDownloadStatus("Download needs ElevenLabs or Google — switch source above.", "muted");
       return;
     }
     var text = textEl.value.trim();
@@ -1144,9 +1293,9 @@
       setDownloadStatus("Add text and pick a voice first.", "muted");
       return;
     }
-    if (text.length > MAX_TTS_CHARS) {
+    if (text.length > maxCharsForMode()) {
       setDownloadStatus(
-        "Text too long (max " + MAX_TTS_CHARS + " characters).",
+        "Text too long (max " + maxCharsForMode().toLocaleString("en-US") + " characters).",
         "error"
       );
       return;
@@ -1167,10 +1316,13 @@
       setControls();
 
       // iOS: browser navigation to Content-Disposition attachment is the
-      // reliable raw-file path (<a download> is flaky in Safari).
-      if (isIOSLike()) {
+      // reliable raw-file path (<a download> is flaky in Safari). Very long
+      // Google text is too big for one request, so it takes the blob path.
+      var formSource = mode;
+      var formOk = formSource !== "google" || text.length <= GOOGLE_REQUEST_CHARS;
+      if (isIOSLike() && formOk) {
         setDownloadStatus(iosDownloadStatus(filename), "muted");
-        submitDownloadForm(text, voiceId, rate, filename);
+        submitDownloadForm(text, voiceId, rate, filename, formSource);
         // Also try blob+download when Play already cached the same audio —
         // harmless if Safari ignores it; helps when it works.
         if (hasCached) {
@@ -1219,8 +1371,8 @@
 
   function shareAudio() {
     if (downloading) return;
-    if (mode !== "elevenlabs" || !elevenLabsAvailable) {
-      setDownloadStatus("Share needs ElevenLabs — switch source above.", "muted");
+    if (!isCloudMode() || !cloudProvider().available) {
+      setDownloadStatus("Share needs ElevenLabs or Google — switch source above.", "muted");
       return;
     }
     var text = textEl.value.trim();
@@ -1229,9 +1381,9 @@
       setDownloadStatus("Add text and pick a voice first.", "muted");
       return;
     }
-    if (text.length > MAX_TTS_CHARS) {
+    if (text.length > maxCharsForMode()) {
       setDownloadStatus(
-        "Text too long (max " + MAX_TTS_CHARS + " characters).",
+        "Text too long (max " + maxCharsForMode().toLocaleString("en-US") + " characters).",
         "error"
       );
       return;
@@ -1288,9 +1440,9 @@
             setDownloadStatus("Cancelled", "muted");
           } else {
             // Share unavailable — fall back to true download form / anchor.
-            if (isIOSLike()) {
+            if (isIOSLike() && (mode !== "google" || text.length <= GOOGLE_REQUEST_CHARS)) {
               setDownloadStatus(iosDownloadStatus(name), "muted");
-              submitDownloadForm(text, voiceId, rate, name);
+              submitDownloadForm(text, voiceId, rate, name, mode);
             } else {
               triggerAnchorDownload(payload.blob, name);
               setDownloadStatus("Saved · " + name, "ok");
@@ -1335,7 +1487,7 @@
   }
 
   function clipMetaText(clip) {
-    var parts = [clip.voiceName];
+    var parts = [clip.source === "google" ? clip.voiceName + " (Google)" : clip.voiceName];
     if (clip.exportable) {
       var d = Clips.formatDuration(clip.duration);
       if (d) parts.push(d);
@@ -1389,7 +1541,7 @@
       } else {
         var note = document.createElement("span");
         note.className = "clip-noexport";
-        note.textContent = "No MP3 — export is ElevenLabs only";
+        note.textContent = "No MP3 — device voices can’t export";
         actions.appendChild(note);
       }
       li.appendChild(actions);
@@ -1529,7 +1681,7 @@
       setControls();
       return;
     }
-    if (mode === "elevenlabs") {
+    if (isCloudMode()) {
       if (!text) return;
       playEleven(text);
       return;
@@ -1565,7 +1717,7 @@
   }
 
   function pause() {
-    if (audioActive || mode === "elevenlabs") {
+    if (audioActive || isCloudMode()) {
       pauseEleven();
       return;
     }
@@ -1581,7 +1733,7 @@
   }
 
   function previewVoice() {
-    if (mode === "elevenlabs") {
+    if (isCloudMode()) {
       previewEleven();
       return;
     }
@@ -1611,35 +1763,51 @@
     }, 250);
   }
 
-  function fetchElevenVoices() {
-    return fetch("/api/voices", { headers: { Accept: "application/json" } })
+  function fetchCloudVoices(prov) {
+    return fetch(prov.voicesUrl, { headers: { Accept: "application/json" } })
       .then(function (res) {
         if (res.status === 503) {
-          throw new Error("ElevenLabs not configured on the server (missing API key).");
+          throw new Error(
+            prov.id === "google"
+              ? GOOGLE_SETUP_NOTE
+              : "ElevenLabs not configured on the server (missing API key)."
+          );
         }
         if (!res.ok) {
-          throw new Error("ElevenLabs voices unavailable (API error " + res.status + ").");
+          return res
+            .json()
+            .catch(function () {
+              return {};
+            })
+            .then(function (err) {
+              if (prov.id === "google") {
+                throw new Error(
+                  err && err.error && err.reason && err.reason !== "google_error"
+                    ? "Google voices: " + err.error
+                    : "Google voices unavailable (API error " + res.status + ")."
+                );
+              }
+              throw new Error("ElevenLabs voices unavailable (API error " + res.status + ").");
+            });
         }
         return res.json();
       })
       .then(function (data) {
         var list = (data && data.voices) || [];
         if (!list.length) {
-          throw new Error("ElevenLabs returned no voices.");
+          throw new Error(prov.label + " returned no voices.");
         }
-        elVoices = list;
-        elevenLabsAvailable = true;
-        elUnavailableReason = "";
+        prov.voices = list;
+        prov.available = true;
+        prov.reason = "";
       });
   }
 
-  function markElevenUnavailable(err) {
-    elevenLabsAvailable = false;
-    elVoices = [];
-    var msg =
-      (err && err.message) ||
-      "ElevenLabs unavailable — using device voices.";
-    elUnavailableReason = msg;
+  function markUnavailable(prov, err) {
+    prov.available = false;
+    prov.voices = [];
+    prov.reason =
+      (err && err.message) || prov.label + " unavailable — using device voices.";
   }
 
   function wireUi() {
@@ -1665,8 +1833,14 @@
 
     if (sourceElBtn) {
       sourceElBtn.addEventListener("click", function () {
-        if (!elevenLabsAvailable || mode === "elevenlabs") return;
+        if (!providers.elevenlabs.available || mode === "elevenlabs") return;
         applySource("elevenlabs", true);
+      });
+    }
+    if (sourceGoogleBtn) {
+      sourceGoogleBtn.addEventListener("click", function () {
+        if (!providers.google.available || mode === "google") return;
+        applySource("google", true);
       });
     }
     if (sourceDeviceBtn) {
@@ -1698,10 +1872,13 @@
 
     wireDeviceVoices();
 
-    fetchElevenVoices()
-      .catch(function (err) {
-        markElevenUnavailable(err);
-      })
+    function load(prov) {
+      return fetchCloudVoices(prov).catch(function (err) {
+        markUnavailable(prov, err);
+      });
+    }
+
+    Promise.all([load(providers.elevenlabs), load(providers.google)])
       .then(function () {
         // Don't overwrite a saved ElevenLabs preference if the API is briefly down.
         applySource(pickInitialSource(), false);

@@ -1,12 +1,13 @@
 /**
  * POST /api/download — synthesize speech and force a file download.
  * Accepts application/x-www-form-urlencoded, multipart/form-data, or JSON:
- *   text, voiceId, rate?, filename?
+ *   text, voiceId, rate?, filename?, source? ("google" -> Google Cloud TTS)
  * Returns audio/mpeg with Content-Disposition: attachment.
  * Same ElevenLabs logic as api/tts.js (speed 0.7–1.2, turbo model).
  */
 var MAX_CHARS = 5000;
 var MODEL_ID = "eleven_turbo_v2_5";
+var Google = require("./_google.js");
 
 function sanitizeFilename(raw) {
   var name = String(raw || "").trim();
@@ -109,12 +110,20 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  var body = parseBody(req) || {};
+
+  // Google voices (source=google): same chunked synthesis as /api/google-tts.
+  if (String(body.source || "").toLowerCase() === "google") {
+    return Google.respondWithSpeech(body, res, {
+      disposition: contentDisposition(body.filename),
+    });
+  }
+
   var apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
     return res.status(503).json({ error: "ElevenLabs not configured" });
   }
 
-  var body = parseBody(req) || {};
   var text = typeof body.text === "string" ? body.text.trim() : "";
   var voiceId = typeof body.voiceId === "string" ? body.voiceId.trim() : "";
   var rate = typeof body.rate === "number" ? body.rate : parseFloat(body.rate);
