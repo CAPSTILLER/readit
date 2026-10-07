@@ -677,7 +677,25 @@
     if (/speed/i.test(detail) || /expected.*0\.7.*1\.2/i.test(detail)) {
       return "Speed too fast for ElevenLabs (max 1.2×)";
     }
-    if (err && err.error) return err.error;
+    if (/quota_exceeded|credits remaining|quota/i.test(detail)) {
+      var m = detail.match(/(\d[\d,]*) credits remaining[^\d]*(\d[\d,]*)/i);
+      return m
+        ? "Out of ElevenLabs credits: " + m[1] + " left, this needs " + m[2] + ". Try shorter text or top up ElevenLabs."
+        : "Out of ElevenLabs credits. Try shorter text or top up ElevenLabs.";
+    }
+    if (status === 401 || /invalid_api_key|unauthorized/i.test(detail)) {
+      return "ElevenLabs key problem (401). Check the API key in Vercel.";
+    }
+    if (status === 429 || /too_many|rate limit|concurrent/i.test(detail)) {
+      return "ElevenLabs is busy (rate limit). Wait a moment and try again.";
+    }
+    if (status === 504 || /timeout|timed out/i.test(detail)) {
+      return "ElevenLabs took too long. Try a shorter piece of text.";
+    }
+    if (err && err.error) {
+      var d = String(err.detail || "").replace(/\s+/g, " ").trim().slice(0, 160);
+      return err.error + (status ? " (" + status + ")" : "") + (d ? ": " + d : "");
+    }
     return "TTS failed" + (status ? " (" + status + ")" : "");
   }
 
